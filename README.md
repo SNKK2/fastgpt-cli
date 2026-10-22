@@ -65,8 +65,9 @@ fastgpt init --base https://your-host --user <账号> --pass <密码>
 # 2. 确认身份
 fastgpt auth whoami
 
-# 3. 找模型 ObjectId（从已有应用取）
-fastgpt wf get <已有appId> | grep -o '"modelId":"[^"]*"' | head -1
+# 3. 找模型 ObjectId
+fastgpt model id        # 扫描团队应用，自动提取
+# 如果返回空，说明团队还没有应用配过模型 → 按提示去 WebUI 点一次模型下拉框
 
 # 4. 找知识库 ID
 fastgpt ds list

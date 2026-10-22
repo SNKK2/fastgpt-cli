@@ -209,7 +209,8 @@ fastgpt auth cookie --token T
 fastgpt auth whoami
 
 # 模型
-fastgpt model list --type llm
+fastgpt model list --type llm          # 只看名字，没有 ID
+fastgpt model id                        # 从已有应用提取 modelId（ObjectId）
 
 # 应用
 fastgpt app list

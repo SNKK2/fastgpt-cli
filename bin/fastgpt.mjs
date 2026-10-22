@@ -28,6 +28,99 @@ function parseArgs(argv) {
 
 const readJson = p => JSON.parse(fs.readFileSync(p, 'utf8'));
 
+
+// ---------- modelId 预检 hook ----------
+const MODEL_ID_RE = /^[0-9a-f]{24}$/i;
+
+/** 扫描团队应用，收集可用 modelId */
+async function scanModelIds() {
+  const apps = await client.post('/api/core/app/listV2', { parentId: null, searchKey: '' });
+  const list = apps.list || apps || [];
+  const found = [];
+  const seen = new Set();
+  for (const a of list) {
+    if (!['advanced', 'simple', 'chatAgent'].includes(a.type)) continue;
+    try {
+      const d = await client.get(`/api/core/app/detail?appId=${a._id}`);
+      for (const n of d.nodes || []) {
+        for (const inp of n.inputs || []) {
+          if (inp.key !== 'modelId') continue;
+          const v = inp.value;
+          if (typeof v !== 'string' || !MODEL_ID_RE.test(v) || seen.has(v)) continue;
+          seen.add(v);
+          found.push({ modelId: v, fromApp: a.name, node: n.nodeId });
+        }
+      }
+    } catch {}
+  }
+  return found;
+}
+
+/**
+ * 运行前检查 modelId。DSL 里的 modelId 无效时：
+ *   有可用值 → 自动填充并提示
+ *   无可用值 → 打印可执行引导并中断
+ * 返回修正后的 nodes。
+ */
+async function ensureModelIdHook(nodes, { autoFill = true } = {}) {
+  const bad = [];
+  for (const n of nodes) {
+    for (const inp of n.inputs || []) {
+      if (inp.key !== 'modelId') continue;
+      const v = inp.value;
+      if (typeof v === 'string' && MODEL_ID_RE.test(v)) continue;
+      if (Array.isArray(v)) continue;  // 引用型，运行时解析
+      bad.push({ node: n.nodeId, value: v });
+    }
+  }
+  if (!bad.length) return nodes;
+
+  const unique = [...new Set(bad.map(b => String(b.value)))];
+  console.error('');
+  console.error('⚠️  检测到 modelId 无效');
+  console.error(`   节点: ${bad.map(b => b.node).join(', ')}`);
+  console.error(`   当前值: ${unique.map(v => v || '(空)').join(', ')}`);
+  console.error('');
+  console.error('   FastGPT 的 modelId 必须是 24 位 ObjectId，且只能从已配置模型的应用中获取。');
+  console.error('');
+
+  let candidates = [];
+  try { candidates = await scanModelIds(); } catch {}
+
+  if (!candidates.length) {
+    console.error('❌ 当前团队没有任何应用配置过模型，无法自动填充。');
+    console.error('');
+    console.error('请在 FastGPT WebUI 完成以下操作（约 30 秒）：');
+    console.error('  1. 打开任意应用（或新建一个对话应用）');
+    console.error('  2. 左侧节点面板拖入「AI 对话」节点');
+    console.error('  3. 点击该节点里的「AI 模型」下拉框，选中任意模型');
+    console.error('  4. 保存（Ctrl+S）');
+    console.error('');
+    console.error('完成后重新运行本命令，CLI 会自动提取 modelId。');
+    process.exit(3);
+  }
+
+  if (!autoFill) {
+    console.error('可用 modelId：');
+    candidates.forEach(c => console.error(`  ${c.modelId}  (来自应用「${c.fromApp}」)`));
+    console.error('');
+    console.error('请填入 DSL 的 modelId 字段后重试。');
+    process.exit(3);
+  }
+
+  const pick = candidates[0].modelId;
+  for (const n of nodes) {
+    for (const inp of n.inputs || []) {
+      if (inp.key === 'modelId' && !(typeof inp.value === 'string' && MODEL_ID_RE.test(inp.value)) && !Array.isArray(inp.value)) {
+        inp.value = pick;
+      }
+    }
+  }
+  console.error(`✓ 已自动填充 modelId: ${pick}  (来自应用「${candidates[0].fromApp}」)`);
+  console.error('');
+  return nodes;
+}
+
 // ---------- DSL 构建（wf build / wf validate 共用） ----------
 function buildFromDsl(dsl) {
   const nodes = [];
@@ -158,6 +251,53 @@ const commands = {
     out(ms.map(m => ({ name: m.name, provider: m.provider, type: m.type, testMode: m.testMode })));
   },
 
+  /**
+   * 从团队已有应用里提取可用的 modelId（ObjectId）。
+   * 这是新账号获取 modelId 的唯一自动途径。
+   */
+  async 'model id'(args, f) {
+    const want = f.name;   // 可选：按模型名筛选
+    const apps = await client.post('/api/core/app/listV2', { parentId: null, searchKey: '' });
+    const list = apps.list || apps || [];
+    const found = [];
+    const seen = new Set();
+
+    for (const a of list) {
+      if (!['advanced', 'simple', 'chatAgent'].includes(a.type)) continue;
+      try {
+        const d = await client.get(`/api/core/app/detail?appId=${a._id}`);
+        for (const n of d.nodes || []) {
+          for (const inp of n.inputs || []) {
+            if (inp.key !== 'modelId') continue;
+            const v = inp.value;
+            if (typeof v !== 'string' || !/^[0-9a-f]{24}$/i.test(v)) continue;
+            if (seen.has(v)) continue;
+            seen.add(v);
+            found.push({ modelId: v, fromApp: a.name, appId: a._id, node: n.nodeId });
+          }
+        }
+      } catch { /* 单个应用读取失败不影响整体 */ }
+    }
+
+    if (!found.length) {
+      out({
+        ok: false,
+        error: '当前团队没有任何应用配置过模型，无法自动获取 modelId',
+        howToFix: [
+          '方式 A（推荐）：在 FastGPT WebUI 里任选一个应用，左侧拖入「AI 对话」节点，',
+          '           点击节点里的模型下拉框选中任意模型，保存（Ctrl+S），然后重新运行本命令。',
+          '',
+          '方式 B：如果团队里已有配置过模型的应用，确认它出现在 fastgpt app list 里。',
+          '',
+          '完成后运行：fastgpt model id'
+        ]
+      });
+      process.exit(1);
+    }
+
+    out(want ? found.filter(x => x.modelId === want) : found);
+  },
+
   // ===== 应用 =====
   async 'app list'(args, f) {
     const d = await client.post('/api/core/app/listV2', { parentId: null, searchKey: f.search || '', type: f.type || undefined });
@@ -267,7 +407,12 @@ const commands = {
 
     let built;
     try { built = buildFromDsl(dsl); } catch (e) { fail(e.message); }
-    const { nodes, edges, chatConfig } = built;
+    let { nodes, edges, chatConfig } = built;
+
+    // 预检：modelId 无效时自动填充或引导
+    if (!f['no-model-hook']) {
+      nodes = await ensureModelIdHook(nodes, { autoFill: !f['no-auto-model'] });
+    }
 
     const v = validateWorkflow({ nodes, edges, chatConfig });
     if (!v.ok) { out({ ok: false, stage: 'validate', errors: v.errors, warnings: v.warnings }); process.exit(2); }
@@ -702,7 +847,7 @@ const commands = {
       groups: {
         init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],
         auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--timeout 240]（打开浏览器扫码）', 'cookie --token', 'whoami', 'logout'],
-        model: ['list [--type llm]'],
+        model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
         wf: ['build <dsl.json> [--dry-run]', 'validate <json>', 'get <appId> [--out f]', 'publish <appId>'],
         ds: ['list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
