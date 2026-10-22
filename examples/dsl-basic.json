@@ -1,0 +1,44 @@
+{
+  "appId": "<YOUR_APP_ID>",
+  "versionName": "v1",
+  "publish": false,
+  "nodes": [
+    { "type": "start", "id": "n_start" },
+
+    { "type": "classify", "id": "n_classify",
+      "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
+      "prompt": "判断用户问题属于知识库问答还是闲聊",
+      "question": "n_start:userChatInput",
+      "branches": [
+        { "key": "kb", "label": "知识库问答" },
+        { "key": "chat", "label": "闲聊" }
+      ] },
+
+    { "type": "datasetSearch", "id": "n_search",
+      "datasets": ["<YOUR_DATASET_ID>:知识库名称"],
+      "question": "n_start:userChatInput" },
+
+    { "type": "chat", "id": "n_chat",
+      "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
+      "prompt": "依据知识库引用内容回答，引用不足时明确说明无法回答",
+      "question": "n_start:userChatInput",
+      "quoteQA": "n_search:quoteQA" },
+
+    { "type": "answer", "id": "n_answer", "content": "n_chat:answerText" },
+
+    { "type": "chat", "id": "n_chat2",
+      "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
+      "prompt": "友好地回应用户的闲聊",
+      "question": "n_start:userChatInput" },
+
+    { "type": "answer", "id": "n_answer2", "content": "n_chat2:answerText" }
+  ],
+  "edges": [
+    ["n_start", "n_classify"],
+    ["n_classify", "n_search", "kb"],
+    ["n_search", "n_chat"],
+    ["n_chat", "n_answer"],
+    ["n_classify", "n_chat2", "chat"],
+    ["n_chat2", "n_answer2"]
+  ]
+}

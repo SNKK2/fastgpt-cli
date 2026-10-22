@@ -1,0 +1,46 @@
+{
+  "appId": "<YOUR_APP_ID>",
+  "versionName": "contract-review-v1",
+  "publish": true,
+  "chatConfig": {
+    "variables": [],
+    "welcomeText": "请上传合同文件（支持 docx / pdf / txt），我会为您完成风险审查并生成批注版合同。",
+    "fileSelectConfig": {
+      "maxFiles": 5,
+      "canSelectFile": true,
+      "canSelectImg": false,
+      "canSelectVideo": false,
+      "canSelectAudio": false
+    }
+  },
+  "nodes": [
+    { "type": "start", "id": "n_start", "withFiles": true },
+
+    { "type": "readFiles", "id": "n_read",
+      "files": "n_start:userFiles" },
+
+    { "type": "chat", "id": "n_review",
+      "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
+      "prompt": "你是资深法务合同审查专家。请审查下面的合同，并直接输出批注版。\n\n【合同原文】\n{{$n_read.system_text$}}\n\n输出格式（严格照做，直接以 # 开头，不要任何前言）：\n\n# 合同审查批注版\n\n## 一、审查结论\n本次共发现 X 处风险（高 a、中 b、低 c）。整体判断：一句话。\n\n## 二、批注正文\n\n**第一条 服务内容**\n（原文照抄）\n> 🔴 **【高风险】** 问题说明\n> 💡 **修改建议**：具体改法\n\n（逐条处理，中风险用 🟡，低风险用 🟢，没问题的条款直接照抄不加批注）\n\n## 三、修改优先级\n- **P0 签署前必须改**：……\n- **P1 应争取修改**：……\n- **P2 建议补充**：……\n\n审查重点：主体资格、附件完整性、付款条件、违约责任对称性、知识产权归属、解除权公平性、争议管辖。",
+      "question": "n_start:userChatInput" },
+
+    { "type": "contentExtract", "id": "n_extract",
+      "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
+      "description": "从合同审查批注版中统计风险数量和结论",
+      "text": "n_review:answerText",
+      "keys": [
+        { "key": "totalRisks", "desc": "风险点总数", "valueType": "number" },
+        { "key": "highRiskCount", "desc": "高风险条款数量", "valueType": "number" },
+        { "key": "riskSummary", "desc": "整体风险结论，50字以内", "valueType": "string" },
+        { "key": "topIssues", "desc": "最严重的三个问题条款摘要", "valueType": "string" }
+      ] },
+
+    { "type": "answer", "id": "n_answer", "content": "n_review:answerText" }
+  ],
+  "edges": [
+    ["n_start", "n_read"],
+    ["n_read", "n_review"],
+    ["n_review", "n_extract"],
+    ["n_extract", "n_answer"]
+  ]
+}
