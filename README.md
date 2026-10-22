@@ -36,6 +36,15 @@ FastGPT 的 API 有一批会静默失败的坑，直接手写 HTTP 几乎必踩�
 ## 安装
 
 ```bash
+git clone https://github.com/SNKK2/fastgpt-cli.git
+cd fastgpt-cli
+chmod +x bin/fastgpt.mjs
+node bin/fastgpt.mjs init     # 配置地址 + 登录，一次完成
+```
+
+## 安装（其他方式）
+
+```bash
 # 作为 skill
 cp -r fastgpt-cli ~/.agents/skills/
 
@@ -47,10 +56,11 @@ npm link          # 或 ln -s "$PWD/bin/fastgpt.mjs" /usr/local/bin/fastgpt
 ## 快速开始
 
 ```bash
-# 1. 认证（首次使用/cookie 失效会自动引导）
-fastgpt auth login                      # 交互选择：密码 / 扫码 / 粘贴
-fastgpt auth login --user 138xxxx --pass '密码'
-fastgpt auth scan                       # 直接扫码登录
+# 1. 初始化：配置服务地址 + 登录（写 ~/.fastgpt/config.json）
+fastgpt init
+
+# 非交互环境
+fastgpt init --base https://your-host --user <账号> --pass <密码>
 
 # 2. 确认身份
 fastgpt auth whoami

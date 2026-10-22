@@ -3,7 +3,7 @@
 // 通用约定：所有命令输出 JSON，错误以非零退出码返回
 import fs from 'node:fs';
 import path from 'node:path';
-import { client, loginRaw, whoami, FastGPTError } from '../lib/client.mjs';
+import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
 import { ensureAuth, scanLogin, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
@@ -58,12 +58,68 @@ function buildFromDsl(dsl) {
 // ---------- 命令实现 ----------
 
 const commands = {
+  // ===== 初始化 =====
+  /**
+   * 首次使用引导：配置服务地址 + 登录，一次完成。
+   * 交互式（TTY）会逐步询问；非 TTY 用 --base/--user/--pass 参数。
+   */
+  async 'init'(args, f) {
+    const rl = process.stdin.isTTY
+      ? (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout })
+      : null;
+    const ask = async (q, def) => {
+      if (!rl) return def;
+      const a = (await rl.question(q)).trim();
+      return a || def;
+    };
+
+    try {
+      // 1. 服务地址
+      let base = f.base || process.env.FASTGPT_BASE || getBase();
+      if (!base) {
+        if (!rl) {
+          fail('需要 --base 参数（或设置 FASTGPT_BASE）\n  fastgpt init --base https://your-fastgpt-host --user <账号> --pass <密码>');
+        }
+        base = await ask('FastGPT 服务地址（如 https://your-host）: ');
+      }
+      if (!base) fail('服务地址不能为空');
+      if (!/^https?:\/\//.test(base)) base = 'https://' + base;
+      base = base.replace(/\/$/, '');
+
+      saveConfig({ base });
+      console.error(`✓ 已保存服务地址到 ${CONFIG_PATH}`);
+
+      // 2. 登录
+      const me = await ensureAuth({ interactive: !!rl, user: f.user, pass: f.pass });
+      out({
+        ok: true,
+        base,
+        config: CONFIG_PATH,
+        home: HOME,
+        user: me.username,
+        userId: me._id,
+        team: me.team?.teamName,
+        tmbId: me.team?.tmbId
+      });
+    } finally {
+      rl?.close();
+    }
+  },
+
   // ===== 认证 =====
   async 'auth login'(args, f) {
     const user = f.user || process.env.FASTGPT_USER;
     const pass = f.pass || process.env.FASTGPT_PASS;
     // 无参数时走交互引导（密码 / 扫码 / 粘贴）
     if (!user || !pass) {
+      if (!process.stdin.isTTY) {
+        fail(
+          '在非交互环境下需要显式提供凭证。二选一：\n' +
+          '  fastgpt auth login --user <账号> --pass <密码>\n' +
+          '  fastgpt auth scan        # 打开浏览器扫码（需有图形界面）\n\n' +
+          '如果是首次使用，建议先运行：fastgpt init'
+        );
+      }
       const me = await ensureAuth({ interactive: true });
       out({ ok: true, user: me.username, userId: me._id, team: me.team?.teamName, tmbId: me.team?.tmbId });
       return;
@@ -636,6 +692,7 @@ const commands = {
     out({
       usage: 'fastgpt <group> <cmd> [args] [flags]',
       groups: {
+        init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],
         auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--timeout 240]（打开浏览器扫码）', 'cookie --token', 'whoami', 'logout'],
         model: ['list [--type llm]'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
@@ -670,14 +727,20 @@ if (!fn) { out({ ok: false, error: `未知命令: ${pos.slice(0, 3).join(' ')}` 
 // 已消费的参数层级
 const consumed = key.split(' ').length;
 // 离线命令：不触网，不需要鉴权
-const authGroup = pos[0] === 'auth' || pos[0] === 'help' || !pos[0];
+const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' || !pos[0];
 const offlineCmds = new Set(['wf validate']);
 const isOffline = offlineCmds.has(key) || (key === 'wf build' && flags['dry-run']);
 
 async function run(handler, handlerArgs, handlerFlags) {
   if (!authGroup && !isOffline) {
-    if (!process.env.FASTGPT_BASE) {
-      fail('缺少 FASTGPT_BASE 环境变量。请设置为你的 FastGPT 服务地址，例如：\n  export FASTGPT_BASE=https://your-fastgpt-host');
+    if (!isConfigured()) {
+      fail(
+        '尚未配置 FastGPT 服务地址。\n\n' +
+        '首次使用请运行：\n' +
+        '  fastgpt init\n\n' +
+        '或设置环境变量：\n' +
+        '  export FASTGPT_BASE=https://your-fastgpt-host'
+      );
     }
     await ensureAuth();
   }

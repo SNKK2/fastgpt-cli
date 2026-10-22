@@ -50,11 +50,36 @@ git clone https://github.com/SNKK2/fastgpt-cli.git
 cd fastgpt-cli
 chmod +x bin/fastgpt.mjs
 
-export FASTGPT_BASE=https://<你的-fastgpt-地址>   # 必填
-node bin/fastgpt.mjs auth login                   # 交互选择登录方式
+node bin/fastgpt.mjs init      # 一次性完成：配置地址 + 登录
 ```
 
-Node 18+；扫码登录需要 22+ 和本机 Chrome。
+`init` 会引导你完成两件事，写入 `~/.fastgpt/config.json`（权限 600）：
+
+1. 服务地址（如 `https://your-fastgpt-host`）
+2. 登录方式（账号密码 / 浏览器扫码 / 粘贴 token）
+
+非交互环境（agent 调用）用参数形式：
+
+```bash
+node bin/fastgpt.mjs init --base https://your-host --user <账号> --pass <密码>
+```
+
+Node 18+；扫码登录需要 Node 22+ 和本机 Chrome。
+
+### 配置位置
+
+| 路径 | 内容 |
+|---|---|
+| `~/.fastgpt/config.json` | 服务地址 |
+| `~/.fastgpt/cookies.json` | 登录态（7 天） |
+
+可用 `FASTGPT_HOME` 覆盖目录，便于多实例隔离：
+
+```bash
+FASTGPT_HOME=~/.fastgpt-prod node bin/fastgpt.mjs init
+```
+
+环境变量 `FASTGPT_BASE` 优先级高于配置文件。
 
 **路径约定**：下文所有 `node bin/fastgpt.mjs` 都假设当前目录是 CLI 仓库根。
 不在根目录时用绝对路径，先记下来：
