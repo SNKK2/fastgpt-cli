@@ -1,20 +1,96 @@
 ---
 name: fastgpt-cli
-description: "通过 CLI 管理 FastGPT：创建工作流/Agent、知识库、权限、运行调试。用于用户要求搭建/修改 FastGPT 工作流、配置知识库检索问答、分配知识库或文档权限、调用应用对话、查询模型列表时。所有操作走已验证的 HTTP API，无需浏览器。"
+description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI 的 DSL 构建并用 wf build 部署，禁止手写 nodes/edges JSON 或直接 curl FastGPT API。踩过的 8 类 API 陷阱已固化在构造器和校验器里，手写 JSON 必然触发。用于搭建/修改 FastGPT 工作流、Agent、知识库、权限、发布渠道、运行调试。"
 ---
 
 # FastGPT CLI
 
-用命令行管理 FastGPT 全部资源。所有命令输出 JSON，错误以非零退出码返回，便于程序化消费。
+## 🚨 红线：先读这一段
 
-## 何时使用
+**如果你正在输出包含 `nodeId` / `sourceHandle` / `flowNodeType` / `selectedType` 的 JSON，立刻停止 —— 走错路了。**
 
-- 用户要搭建 / 修改 FastGPT 工作流、Agent
-- 要做"意图识别 + 知识库问答 + AI 回复"这类组合链路
-- 要管理知识库、文档集合
-- 要查 / 改知识库、文档、应用的协作者权限
-- 要跑应用对话做验证
-- 要查团队可用模型
+| ❌ 错误做法 | 后果 | ✅ 正确做法 |
+|---|---|---|
+| 手写 `{"nodes":[...],"edges":[...]}` | handle 格式、selectedType、modelId 类型、maxToken 等 8 类陷阱必然踩中，UI 上连线消失或输出为空 | 写 DSL，用 `wf build` |
+| 直接 `curl` FastGPT API | 缺 CSRF 头 → 403；pro 接口前缀错 → 404；appId 要放 query → 参数校验失败 | 用 CLI 命令 |
+| 把模型名当 modelId | 发布报 `Model model is unavailable` | `wf get <appId>` 提取 24 位 ObjectId |
+| 看到 `{"code":200}` 就当成功 | `app/update` / `version/update` 是假保存，数据被静默 strip | 用 `wf build`，拉回校验 |
+| 自己算 handle id | `${nodeId}-source-${key}` 顺序反了 UI 不渲染，但运行时照样跑 | `edge()` 或 DSL 数组 |
+
+**唯一合法的建工作流方式**：
+
+```bash
+# 1. 写 DSL（人类可读，不是 FastGPT 原始 JSON）
+cat > my-workflow.json <<'DSL'
+{
+  "appId": "<APP_ID>",
+  "nodes": [
+    { "type": "start",  "id": "n_start" },
+    { "type": "chat",   "id": "n_chat", "modelId": "<OBJECT_ID>",
+      "question": "n_start:userChatInput" },
+    { "type": "answer", "id": "n_answer", "content": "n_chat:answerText" }
+  ],
+  "edges": [["n_start","n_chat"], ["n_chat","n_answer"]]
+}
+DSL
+
+# 2. 先干跑校验（不触网）
+node bin/fastgpt.mjs wf build my-workflow.json --dry-run
+
+# 3. 部署
+node bin/fastgpt.mjs wf build my-workflow.json
+```
+
+DSL 里只需要 `type` + `id` + 业务参数，节点结构、连线 handle、selectedType 全部由 CLI 生成。
+
+## 安装与前置
+
+```bash
+git clone https://github.com/SNKK2/fastgpt-cli.git
+cd fastgpt-cli
+chmod +x bin/fastgpt.mjs
+
+export FASTGPT_BASE=https://<你的-fastgpt-地址>   # 必填
+node bin/fastgpt.mjs auth login                   # 交互选择登录方式
+```
+
+Node 18+；扫码登录需要 22+ 和本机 Chrome。
+
+**路径约定**：下文所有 `node bin/fastgpt.mjs` 都假设当前目录是 CLI 仓库根。
+不在根目录时用绝对路径，先记下来：
+
+```bash
+CLI_ROOT=/path/to/fastgpt-cli
+node "$CLI_ROOT/bin/fastgpt.mjs" help
+```
+
+装成全局后可直接用 `fastgpt <cmd>`：
+
+```bash
+cd "$CLI_ROOT" && npm link
+```
+
+## agent 标准动作
+
+按这个顺序做，不要跳步：
+
+1. `auth whoami` 确认身份、拿 teamId/tmbId
+2. `wf get <任意已有应用>` 提取 `<LLM_MODEL_OBJECT_ID>`（不要猜）
+3. `ds list` 拿知识库 ID（如果要用 RAG）
+4. 写 DSL 文件
+5. `wf build xxx.json --dry-run` —— **必须通过，有 error 就改 DSL，不要绕过**
+6. `wf build xxx.json` 部署
+7. `chat run --appId <id> -q "测试问题" --detail` 验证真的能跑
+
+## 自检清单（交付前必过）
+
+- [ ] 我没有手写任何 `nodeId` / `sourceHandle` / `flowNodeType`
+- [ ] DSL 通过了 `--dry-run`，warnings 也看过
+- [ ] modelId 是 24 位 hex，不是我猜的模型名
+- [ ] 我用 `chat run` 实跑过，`trace` 显示走了预期节点
+- [ ] 我拉回 `wf get` 确认节点数、连线数和预期一致
+
+任何一条不满足，说明流程有问题。
 
 ## 前置：认证
 
@@ -207,6 +283,42 @@ fastgpt chat run --appId <id> -q "问题" --detail
 
 **引用简写**：`"n_start:userChatInput"` 会自动转成 `["n_start","userChatInput"]`。
 **知识库简写**：`"ID:名称"` 会自动展开为完整 dataset 对象。
+
+### 节点类型清单（11 种内置）
+
+`start` `chat` `classify` `datasetSearch` `answer` `readFiles` `contentExtract`
+`ifElse` `textConcat` `http` `code`
+
+详细参数见下方表格。
+
+### 不在清单里怎么办 —— 用 `raw`，不要绕开 CLI
+
+如果需要的节点（如 `agent`、`toolCall`、`loop`、`userSelect`）没有构造器，
+用 `raw` 直接传完整节点 JSON。它仍会走校验和保存，不会让你掉进那些坑：
+
+```json
+{
+  "type": "raw",
+  "id": "n_custom",
+  "node": {
+    "flowNodeType": "userSelect",
+    "name": "用户选择",
+    "avatar": "core/workflow/template/userSelect",
+    "position": { "x": 300, "y": 0 },
+    "showSourceHandle": true, "showTargetHandle": true,
+    "inputs": [ ... ],
+    "outputs": [ ... ]
+  }
+}
+```
+
+`raw` 会自动帮你做的：
+- 补 `nodeId` / `position` / `inputs` / `outputs` 默认值
+- 检测到 `value` 是 `[nodeId, outputId]` 数组时自动设 `selectedType: "reference"`
+- 仍然参与 handle 校验、引用校验、孤立节点检查
+
+**注意**：`raw` 的连线仍要在 `edges` 里手写，但 handle 由 `edge()` 生成，不用自己拼。
+分支节点的 `sourceHandle` 写分支 key 即可（如 `["n_custom","n_next","branchKey"]`）。
 
 ### 支持的节点类型
 

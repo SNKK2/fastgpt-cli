@@ -4,6 +4,22 @@
 
 所有命令输出 JSON，错误以非零退出码返回，适合 agent 直接调用。
 
+## 一句话用法
+
+**工作流用 DSL 描述，不要手写 FastGPT 原始 JSON。**
+
+```bash
+# DSL：只写 type + id + 业务参数
+{ "type": "chat", "id": "n_chat", "modelId": "<OBJECT_ID>", "question": "n_start:userChatInput" }
+
+# 部署：结构、handle、selectedType 全部自动生成
+node bin/fastgpt.mjs wf build my-workflow.json --dry-run   # 先校验
+node bin/fastgpt.mjs wf build my-workflow.json             # 再写入
+```
+
+手写 `nodeId` / `sourceHandle` / `flowNodeType` 会踩中下文所有坑。
+DSL 未覆盖的节点类型用 `"type": "raw"` 传完整 JSON，仍然走校验。
+
 ## 为什么需要它
 
 FastGPT 的 API 有一批会静默失败的坑，直接手写 HTTP 几乎必踩：
