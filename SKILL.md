@@ -77,7 +77,8 @@ git clone https://github.com/SNKK2/fastgpt-cli.git
 cd fastgpt-cli
 chmod +x bin/fastgpt.mjs
 
-node bin/fastgpt.mjs init      # 一次性完成：配置地址 + 登录
+node bin/fastgpt.mjs init      # 配置地址 + 登录
+node bin/fastgpt.mjs doctor    # 环境自检：现在能不能干活
 ```
 
 `init` 会引导你完成两件事，写入 `~/.fastgpt/config.json`（权限 600）：
@@ -122,10 +123,73 @@ node "$CLI_ROOT/bin/fastgpt.mjs" help
 cd "$CLI_ROOT" && npm link
 ```
 
+## 错误契约（agent 必读）
+
+所有错误都是结构化 envelope，**`hint` 就是操作指令，`action_required` 决定你该做什么**：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "type": "platform",
+    "subtype": "model_id_unavailable",
+    "message": "当前团队没有任何应用配置过模型，无法提取 modelId",
+    "hint": "请让用户完成：1) 打开任意应用 2) 拖入「AI 对话」节点 3) 选模型 4) 保存",
+    "next_command": "fastgpt model id",
+    "action_required": "user",
+    "forbidden": "不要用 000000000000000000000000 或任意编造的 24 位 hex 冒充 modelId"
+  }
+}
+```
+
+**`action_required` 的三种值，决定你的行为**：
+
+| 值 | 含义 | 你该做什么 |
+|---|---|---|
+| `self` | 你能解决 | 执行 `next_command` |
+| `user` | 必须用户操作 | **把 `hint` 原文发给用户，结束本轮**，不要自己想办法绕 |
+| `none` | 无法解决 | 上报 |
+
+**`forbidden` 字段是硬性禁止**。看到它就不要尝试该做法，即使那样能让命令"通过"。
+
+### 退出码
+
+| 码 | category | 含义 |
+|---|---|---|
+| 10 | config | 未配置 |
+| 11 | auth | 未登录 |
+| 12 | permission | 权限不足 |
+| 13 | resource | 资源不存在 |
+| 14 | platform | 平台限制 |
+| 15 | network | 网络异常 |
+| 2 | validation | 校验失败 |
+| 1 | usage | 用法错误 |
+
+## 扫码登录：Split-Flow
+
+**不要在单轮里阻塞等待用户扫码** —— 你的中间输出用户看不到。
+
+```bash
+# 第一轮：立即返回，不阻塞
+fastgpt auth scan --no-wait
+# → {"ok":true, "sessionId":"9460", "url":"https://.../login",
+#    "hint":"把这条消息发给用户并结束本轮",
+#    "nextCommand":"fastgpt auth scan --wait --session-id 9460",
+#    "action_required":"user"}
+
+# 结束本轮，等用户回复「扫好了」
+
+# 第二轮：确认
+fastgpt auth scan --wait --session-id 9460
+```
+
+浏览器在 `--no-wait` 后会保持打开（detached），第二轮能重连。
+
 ## agent 标准动作
 
 按这个顺序做，不要跳步：
 
+0. `doctor` —— **先跑这个**，一次看清地址/登录/模型/知识库是否就绪
 1. `auth whoami` 确认身份、拿 teamId/tmbId
 2. `wf get <任意已有应用>` 提取 `<LLM_MODEL_OBJECT_ID>`（不要猜）
 3. `ds list` 拿知识库 ID（如果要用 RAG）
@@ -230,8 +294,13 @@ fastgpt wf get <appId> | grep -o '"modelId"[^,]*'
 ## 命令速查
 
 ```bash
+# 自检
+fastgpt doctor
+
 # 认证
 fastgpt auth login --user U --pass P
+fastgpt auth scan --no-wait                        # 第一轮
+fastgpt auth scan --wait --session-id <id>         # 第二轮
 fastgpt auth cookie --token T
 fastgpt auth whoami
 

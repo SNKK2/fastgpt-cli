@@ -4,12 +4,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
-import { ensureAuth, scanLogin, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
+import { cliError, exitCodeFor, isCliError } from '../lib/errors.mjs';
+import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
 
 const out = o => console.log(JSON.stringify(o, null, 2));
-const fail = (msg, extra = {}) => { out({ ok: false, error: msg, ...extra }); process.exit(1); };
+
+/** 结构化失败：subtype 必须在 errors.mjs 注册表中 */
+const failCli = (subtype, overrides = {}) => {
+  const err = cliError(subtype, overrides);
+  out(err.toEnvelope());
+  process.exit(exitCodeFor(err));
+};
+
+/** 兼容旧调用：普通的用法错误 */
+const fail = (msg, extra = {}) => {
+  const err = cliError(extra.subtype || 'bad_usage', { message: msg, ...extra });
+  out(err.toEnvelope());
+  process.exit(exitCodeFor(err));
+};
 
 // ---------- 简易参数解析 ----------
 function parseArgs(argv) {
@@ -139,16 +153,17 @@ async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = fals
   try { candidates = await scanModelIds(); } catch {}
 
   if (!candidates.length) {
-    console.error('❌ 当前团队没有任何应用配置过模型，无法自动填充。');
+    // 结构化输出到 stdout（agent 读这个），人类可读提示到 stderr
+    const err = cliError('model_id_unavailable');
     console.error('');
-    console.error('请在 FastGPT WebUI 完成以下操作（约 30 秒）：');
-    console.error('  1. 打开任意应用（或新建一个对话应用）');
-    console.error('  2. 左侧节点面板拖入「AI 对话」节点');
-    console.error('  3. 点击该节点里的「AI 模型」下拉框，选中任意模型');
-    console.error('  4. 保存（Ctrl+S）');
+    console.error('❌ ' + err.message);
     console.error('');
-    console.error('完成后重新运行本命令，CLI 会自动提取 modelId。');
-    process.exit(3);
+    console.error(err.hint);
+    console.error('');
+    console.error('⛔ ' + err.forbidden);
+    console.error('');
+    out(err.toEnvelope());
+    process.exit(exitCodeFor(err));
   }
 
   if (!autoFill) {
@@ -172,12 +187,20 @@ async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = fals
     }
   }
   if (forged.length) {
-    console.error('❌ 以下 modelId 格式合法但不存在于当前团队：');
+    const err = cliError('model_id_forged', {
+      details: { forged, available: candidates.map(c => ({ modelId: c.modelId, fromApp: c.fromApp })) }
+    });
+    console.error('');
+    console.error('❌ ' + err.message);
     forged.forEach(x => console.error(`   ${x.node}: ${x.value}`));
     console.error('');
-    console.error('   这通常是伪造或用错了团队的 ID。可用值：');
+    console.error('   可用值：');
     candidates.forEach(c => console.error(`   ${c.modelId}  (来自应用「${c.fromApp}」)`));
-    process.exit(3);
+    console.error('');
+    console.error('⛔ ' + err.forbidden);
+    console.error('');
+    out(err.toEnvelope());
+    process.exit(exitCodeFor(err));
   }
 
   const pick = candidates[0].modelId;
@@ -271,6 +294,81 @@ const commands = {
     }
   },
 
+  /**
+   * 环境自检：一次性告诉用户/agent 现在能不能干活，缺什么。
+   * 目的是把「跑到第三步才发现缺模型」提前到「一进来就知道」。
+   */
+  async 'doctor'(args, f) {
+    const checks = [];
+    const add = (name, ok, detail, fix) => checks.push({ check: name, ok, detail, ...(fix ? { fix } : {}) });
+
+    // 1. 配置
+    const base = getBase();
+    add('服务地址', !!base, base || '未配置', base ? null : 'fastgpt init');
+
+    // 2. 可达性
+    if (base) {
+      const t0 = Date.now();
+      try {
+        await fetch(base + '/api/common/system/getInitData', { signal: AbortSignal.timeout(8000) });
+        add('服务可达', true, `${Date.now() - t0}ms`);
+      } catch (e) {
+        add('服务可达', false, e.message, '检查 FASTGPT_BASE 与网络');
+      }
+    } else {
+      add('服务可达', false, '跳过（未配置地址）', 'fastgpt init');
+    }
+
+    // 3. 登录
+    const me = base ? await checkAuth().catch(() => null) : null;
+    add('登录状态', !!me, me ? `${me.username} / ${me.team?.teamName}` : '未登录', 'fastgpt init');
+
+    // 4. 模型可用性（能否拿到 modelId）
+    let modelIds = [];
+    if (me) {
+      try { modelIds = await scanModelIds(); } catch {}
+      add('可用模型', modelIds.length > 0,
+        modelIds.length ? `${modelIds.length} 个可提取的 modelId` : '没有任何应用配置过模型',
+        modelIds.length ? null : '在 WebUI 任意应用中拖入「AI 对话」节点并选模型后保存，再运行 fastgpt model id');
+    } else {
+      add('可用模型', false, '跳过（未登录）', 'fastgpt init');
+    }
+
+    // 5. 知识库
+    let dsCount = 0;
+    if (me) {
+      try {
+        const d = await client.post('/api/core/dataset/list', { parentId: null, searchKey: '' });
+        dsCount = (d || []).length;
+      } catch {}
+      add('知识库', true, `${dsCount} 个（知识库问答可选，非必需）`);
+    }
+
+    // 6. 应用
+    let appCount = 0;
+    if (me) {
+      try {
+        const d = await client.post('/api/core/app/listV2', { parentId: null, searchKey: '' });
+        appCount = (d.list || d || []).length;
+      } catch {}
+      add('应用', true, `${appCount} 个`);
+    }
+
+    const blockers = checks.filter(c => !c.ok && c.fix);
+    const canWork = !!me && modelIds.length > 0;
+
+    out({
+      ok: blockers.length === 0,
+      ready: canWork,
+      summary: canWork
+        ? '环境就绪，可以建工作流（fastgpt wf build）'
+        : '还不能建工作流，先解决下面标 ✗ 的项',
+      checks,
+      ...(blockers.length ? { next: blockers[0].fix } : {}),
+      version: JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+    });
+  },
+
   // ===== 认证 =====
   async 'auth login'(args, f) {
     const user = f.user || process.env.FASTGPT_USER;
@@ -294,8 +392,16 @@ const commands = {
   },
 
   async 'auth scan'(args, f) {
-    const me = await scanLogin({ timeoutSec: Number(f.timeout) || 240 });
-    out({ ok: true, user: me.username, userId: me._id, team: me.team?.teamName, tmbId: me.team?.tmbId });
+    // 第二轮：继续未完成的会话
+    if (f.wait && f['session-id']) {
+      const me = await resumeScan(String(f['session-id']), { timeoutSec: Number(f.timeout) || 240 });
+      out({ ok: true, user: me.username, userId: me._id, team: me.team?.teamName, tmbId: me.team?.tmbId });
+      return;
+    }
+    // 第一轮：--no-wait 立即返回，交给用户操作
+    const r = await scanLogin({ timeoutSec: Number(f.timeout) || 240, noWait: !!f['no-wait'] });
+    if (r?.noWait) { out({ ok: true, ...r, action_required: 'user' }); return; }
+    out({ ok: true, user: r.username, userId: r._id, team: r.team?.teamName, tmbId: r.team?.tmbId });
   },
 
   async 'auth cookie'(args, f) {
@@ -485,8 +591,7 @@ const commands = {
     if (!f['no-model-hook']) {
       if (f['dry-run']) {
         if (!staticModelIdCheck(nodes)) {
-          out({ ok: false, stage: 'model-id', error: '模型 ID 是伪造值，无法继续' });
-          process.exit(2);
+          failCli('model_id_forged', { message: 'modelId 是全零假值，部署后必然失败' });
         }
       } else {
         nodes = await ensureModelIdHook(nodes, {
@@ -497,7 +602,9 @@ const commands = {
     }
 
     const v = validateWorkflow({ nodes, edges, chatConfig });
-    if (!v.ok) { out({ ok: false, stage: 'validate', errors: v.errors, warnings: v.warnings }); process.exit(2); }
+    if (!v.ok) {
+      failCli('workflow_validate_failed', { details: { errors: v.errors, warnings: v.warnings } });
+    }
 
     if (f['dry-run']) { out({ ok: true, dryRun: true, nodes: nodes.length, edges: edges.length, warnings: v.warnings }); return; }
 
@@ -928,7 +1035,8 @@ const commands = {
       usage: 'fastgpt <group> <cmd> [args] [flags]',
       groups: {
         init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],
-        auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--timeout 240]（打开浏览器扫码）', 'cookie --token', 'whoami', 'logout'],
+        doctor: ['环境自检：检查地址/登录/模型/知识库是否就绪'],
+        auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--no-wait]（打开浏览器扫码）', 'scan --wait --session-id <id>（第二轮确认）', 'cookie --token', 'whoami', 'logout'],
         model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
         wf: ['build <dsl.json> [--dry-run]', 'validate <json>', 'get <appId> [--out f]', 'publish <appId>'],
@@ -962,21 +1070,13 @@ if (!fn) { out({ ok: false, error: `未知命令: ${pos.slice(0, 3).join(' ')}` 
 // 已消费的参数层级
 const consumed = key.split(' ').length;
 // 离线命令：不触网，不需要鉴权
-const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' || !pos[0];
+const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' || pos[0] === 'doctor' || !pos[0];
 const offlineCmds = new Set(['wf validate']);
 const isOffline = offlineCmds.has(key) || (key === 'wf build' && flags['dry-run']);
 
 async function run(handler, handlerArgs, handlerFlags) {
   if (!authGroup && !isOffline) {
-    if (!isConfigured()) {
-      fail(
-        '尚未配置 FastGPT 服务地址。\n\n' +
-        '首次使用请运行：\n' +
-        '  fastgpt init\n\n' +
-        '或设置环境变量：\n' +
-        '  export FASTGPT_BASE=https://your-fastgpt-host'
-      );
-    }
+    if (!isConfigured()) failCli('not_configured');
     await ensureAuth();
   }
   return handler(handlerArgs, handlerFlags);
@@ -995,6 +1095,13 @@ try {
   }
 } catch (e) {
   if (e?.name === 'AbortError') fail('已取消（Ctrl+D）');
-  if (e instanceof FastGPTError) fail(e.message, { code: e.code, statusText: e.statusText, zod: e.zod });
-  fail(e.message, { stack: e.stack?.split('\n').slice(0, 3) });
+  if (isCliError(e)) {
+    out(e.toEnvelope());
+    process.exit(exitCodeFor(e));
+  }
+  if (e instanceof FastGPTError) {
+    out(e.toEnvelope ? e.toEnvelope() : { ok: false, error: e.message });
+    process.exit(exitCodeFor(e));
+  }
+  fail(e.message);
 }

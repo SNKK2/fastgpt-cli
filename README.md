@@ -4,6 +4,40 @@
 
 所有命令输出 JSON，错误以非零退出码返回，适合 agent 直接调用。
 
+## 环境自检
+
+```bash
+$ fastgpt doctor
+{
+  "ok": false,
+  "ready": false,
+  "summary": "还不能建工作流，先解决下面标 ✗ 的项",
+  "checks": [
+    { "check": "服务地址", "ok": true,  "detail": "https://your-host" },
+    { "check": "服务可达", "ok": true,  "detail": "80ms" },
+    { "check": "登录状态", "ok": true,  "detail": "138xxxx / team" },
+    { "check": "可用模型", "ok": false, "detail": "没有任何应用配置过模型",
+      "fix": "在 WebUI 任意应用中拖入「AI 对话」节点并选模型后保存，再运行 fastgpt model id" },
+    { "check": "知识库",   "ok": true,  "detail": "1 个" }
+  ],
+  "next": "在 WebUI 任意应用中拖入「AI 对话」节点并选模型后保存，再运行 fastgpt model id"
+}
+```
+
+一次看清能不能干活，不用跑到第三步才发现缺东西。
+
+## 错误契约
+
+所有错误都是结构化 JSON，`hint` 就是下一步操作，`action_required` 决定谁来处理：
+
+```json
+{ "ok": false, "error": {
+    "type": "platform", "subtype": "model_id_unavailable",
+    "message": "...", "hint": "...", "next_command": "fastgpt model id",
+    "action_required": "user",
+    "forbidden": "不要编造 ObjectId" } }
+```
+
 ## 一句话用法
 
 **工作流用 DSL 描述，不要手写 FastGPT 原始 JSON。**
@@ -39,7 +73,8 @@ FastGPT 的 API 有一批会静默失败的坑，直接手写 HTTP 几乎必踩�
 git clone https://github.com/SNKK2/fastgpt-cli.git
 cd fastgpt-cli
 chmod +x bin/fastgpt.mjs
-node bin/fastgpt.mjs init     # 配置地址 + 登录，一次完成
+node bin/fastgpt.mjs init     # 配置地址 + 登录
+node bin/fastgpt.mjs doctor   # 环境自检
 ```
 
 ## 安装（其他方式）
