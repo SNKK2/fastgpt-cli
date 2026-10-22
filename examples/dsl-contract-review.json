@@ -14,33 +14,74 @@
     }
   },
   "nodes": [
-    { "type": "start", "id": "n_start", "withFiles": true },
-
-    { "type": "readFiles", "id": "n_read",
-      "files": "n_start:userFiles" },
-
-    { "type": "chat", "id": "n_review",
+    {
+      "type": "start",
+      "id": "n_start",
+      "withFiles": true
+    },
+    {
+      "type": "readFiles",
+      "id": "n_read",
+      "files": "n_start:userFiles"
+    },
+    {
+      "type": "chat",
+      "id": "n_review",
       "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
-      "prompt": "你是资深法务合同审查专家。请审查下面的合同，并直接输出批注版。\n\n【合同原文】\n{{$n_read.system_text$}}\n\n输出格式（严格照做，直接以 # 开头，不要任何前言）：\n\n# 合同审查批注版\n\n## 一、审查结论\n本次共发现 X 处风险（高 a、中 b、低 c）。整体判断：一句话。\n\n## 二、批注正文\n\n**第一条 服务内容**\n（原文照抄）\n> 🔴 **【高风险】** 问题说明\n> 💡 **修改建议**：具体改法\n\n（逐条处理，中风险用 🟡，低风险用 🟢，没问题的条款直接照抄不加批注）\n\n## 三、修改优先级\n- **P0 签署前必须改**：……\n- **P1 应争取修改**：……\n- **P2 建议补充**：……\n\n审查重点：主体资格、附件完整性、付款条件、违约责任对称性、知识产权归属、解除权公平性、争议管辖。",
-      "question": "n_start:userChatInput" },
-
-    { "type": "contentExtract", "id": "n_extract",
+      "prompt": "你是资深法务合同审查专家，以**中立第三方**视角审查合同，不预设偏向任何一方。\n目标是识别法律风险与权利义务失衡点，并给出对双方都公平的修改建议。\n\n【合同原文】\n{{$n_read.system_text$}}\n\n输出格式（严格照做，直接以 # 开头，不要任何前言）：\n\n# 合同审查批注版\n\n## 一、审查结论\n本次共发现 X 处风险（高 a、中 b、低 c）。整体判断：一句话概括合同整体质量与主要隐患。\n\n## 二、批注正文\n\n**第一条 服务内容**\n（原文照抄）\n> 🔴 **【高风险】** 问题说明（说明该条款对哪一方不利、可能引发的后果）\n> ⚖️ **平衡建议**：给出兼顾双方利益的修改方案，而非单方倾斜\n\n（逐条处理，中风险用 🟡，低风险用 🟢，没问题的条款直接照抄不加批注）\n\n## 三、双方影响对比\n| 条款 | 对甲方影响 | 对乙方影响 |\n| --- | --- | --- |\n| …… | …… | …… |\n\n## 四、修改优先级\n- **P0 签署前必须改**：涉及合法性、重大风险敞口的条款\n- **P1 应争取修改**：影响权利义务对等性的条款\n- **P2 建议补充**：通用条款与兜底条款\n\n审查重点：主体资格、附件完整性、付款与交付对价、违约责任对等性、知识产权归属、保密与数据安全、解除权公平性、争议管辖便利性、不可抗力与兜底条款。\n\n提示：若委托人明确站在某一方立场，请在结论中说明该方的主要风险敞口与谈判优先级。",
+      "question": "n_start:userChatInput"
+    },
+    {
+      "type": "contentExtract",
+      "id": "n_extract",
       "modelId": "<YOUR_LLM_MODEL_OBJECT_ID>",
       "description": "从合同审查批注版中统计风险数量和结论",
       "text": "n_review:answerText",
       "keys": [
-        { "key": "totalRisks", "desc": "风险点总数", "valueType": "number" },
-        { "key": "highRiskCount", "desc": "高风险条款数量", "valueType": "number" },
-        { "key": "riskSummary", "desc": "整体风险结论，50字以内", "valueType": "string" },
-        { "key": "topIssues", "desc": "最严重的三个问题条款摘要", "valueType": "string" }
-      ] },
-
-    { "type": "answer", "id": "n_answer", "content": "n_review:answerText" }
+        {
+          "key": "totalRisks",
+          "desc": "风险点总数",
+          "valueType": "number"
+        },
+        {
+          "key": "highRiskCount",
+          "desc": "高风险条款数量",
+          "valueType": "number"
+        },
+        {
+          "key": "riskSummary",
+          "desc": "整体风险结论，50字以内",
+          "valueType": "string"
+        },
+        {
+          "key": "topIssues",
+          "desc": "最严重的三个问题条款摘要",
+          "valueType": "string"
+        }
+      ]
+    },
+    {
+      "type": "answer",
+      "id": "n_answer",
+      "content": "n_review:answerText"
+    }
   ],
   "edges": [
-    ["n_start", "n_read"],
-    ["n_read", "n_review"],
-    ["n_review", "n_extract"],
-    ["n_extract", "n_answer"]
+    [
+      "n_start",
+      "n_read"
+    ],
+    [
+      "n_read",
+      "n_review"
+    ],
+    [
+      "n_review",
+      "n_extract"
+    ],
+    [
+      "n_extract",
+      "n_answer"
+    ]
   ]
 }

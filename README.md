@@ -49,7 +49,9 @@ fastgpt ds list
 fastgpt app create --name "客户问答" --type advanced
 # → {"appId":"..."}
 
-# 6. 写 DSL（参考 examples/dsl-basic.json），先干跑
+# 6. 写 DSL，先干跑
+#    examples/dsl-basic.json          意图识别 + 知识库问答双分支
+#    examples/dsl-contract-review.json 文件上传 → 解析 → 合同审查批注（中立第三方视角）
 fastgpt wf build my-workflow.json --dry-run
 
 # 7. 正式保存
@@ -71,7 +73,8 @@ fastgpt-cli/
 │   ├── nodes.mjs          节点构造器（9 种节点）
 │   └── validate.mjs       连线构造器 + 保存前硬校验
 ├── examples/
-│   └── dsl-basic.json     双分支完整示例
+│   ├── dsl-basic.json             意图识别 + 知识库问答双分支
+│   └── dsl-contract-review.json   文件解析 → 合同审查 → 批注版输出
 ├── SKILL.md               agent 使用说明
 └── .fastgpt/              凭证（cookies.json / apikey），权限 600
 ```
