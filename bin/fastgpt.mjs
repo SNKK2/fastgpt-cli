@@ -56,11 +56,47 @@ async function scanModelIds() {
   return found;
 }
 
+/** 纯静态检查：不触网，只列出问题，不阻断 */
+function staticModelIdCheck(nodes) {
+  const isPlaceholder = v => typeof v === 'string' && (/^\s*$/.test(v) || /^<.*>$/.test(v));
+  const issues = [];
+  for (const n of nodes) {
+    for (const inp of n.inputs || []) {
+      if (inp.key !== 'modelId') continue;
+      const v = inp.value;
+      if (Array.isArray(v)) continue;
+      if (typeof v === 'string' && MODEL_ID_RE.test(v)) {
+        if (/^0+$/.test(v)) issues.push({ node: n.nodeId, value: v, kind: 'suspicious-zero' });
+        continue;
+      }
+      if (isPlaceholder(v)) issues.push({ node: n.nodeId, value: v, kind: 'placeholder' });
+      else issues.push({ node: n.nodeId, value: v, kind: 'model-name' });
+    }
+  }
+  if (!issues.length) return true;
+  const ph = issues.filter(i => i.kind === 'placeholder');
+  const nm = issues.filter(i => i.kind === 'model-name');
+  const zr = issues.filter(i => i.kind === 'suspicious-zero');
+  console.error('');
+  if (ph.length) {
+    console.error(`⚠️  ${ph.length} 处 modelId 仍是占位符：${[...new Set(ph.map(i => i.value))].join(', ')}`);
+  }
+  if (nm.length) {
+    console.error(`⚠️  ${nm.length} 处 modelId 填的是模型名：${[...new Set(nm.map(i => i.value))].join(', ')}`);
+  }
+  if (zr.length) {
+    console.error(`❌ ${zr.length} 处 modelId 是全零假值（${zr[0].value}），这不是真实模型，部署后必然失败`);
+  }
+  console.error('   dry-run 只校验结构，不做网络检查。真实部署前请运行：fastgpt model id');
+  console.error('');
+  return !zr.length;
+}
+
 /**
- * 运行前检查 modelId。DSL 里的 modelId 无效时：
- *   有可用值 → 自动填充并提示
- *   无可用值 → 打印可执行引导并中断
- * 返回修正后的 nodes。
+ * 真实部署前的 modelId 检查（会触网）。
+ *   有候选 → 自动填充或校验
+ *   无候选 → 打印引导并中断
+ *   假值(全零/未见过) → 拒绝
  */
 async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = false } = {}) {
   const isPlaceholder = v => typeof v === 'string' && (/^\s*$/.test(v) || /^<.*>$/.test(v));
@@ -71,7 +107,10 @@ async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = fals
     for (const inp of n.inputs || []) {
       if (inp.key !== 'modelId') continue;
       const v = inp.value;
-      if (typeof v === 'string' && MODEL_ID_RE.test(v)) continue;  // 有效 ObjectId
+      if (typeof v === 'string' && MODEL_ID_RE.test(v)) {
+        if (/^0+$/.test(v)) { bad.push({ node: n.nodeId, value: v, fake: true }); }
+        continue;  // 其它格式合法的先放行，稍后与真实候选比对
+      }
       if (Array.isArray(v)) continue;                              // 引用型
       // 模型名（非占位符、非空、非 ObjectId）
       if (allowModelName && isModelName(v) && !isPlaceholder(v)) { nameOnly.push({ node: n.nodeId, value: v }); continue; }
@@ -117,6 +156,27 @@ async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = fals
     candidates.forEach(c => console.error(`  ${c.modelId}  (来自应用「${c.fromApp}」)`));
     console.error('');
     console.error('请填入 DSL 的 modelId 字段后重试。');
+    process.exit(3);
+  }
+
+  // 识别 DSL 里的格式合法但团队中不存在的 modelId（伪造值）
+  const known = new Set(candidates.map(c => c.modelId));
+  const forged = [];
+  for (const n of nodes) {
+    for (const inp of n.inputs || []) {
+      if (inp.key !== 'modelId') continue;
+      const v = inp.value;
+      if (typeof v === 'string' && MODEL_ID_RE.test(v) && !known.has(v)) {
+        forged.push({ node: n.nodeId, value: v });
+      }
+    }
+  }
+  if (forged.length) {
+    console.error('❌ 以下 modelId 格式合法但不存在于当前团队：');
+    forged.forEach(x => console.error(`   ${x.node}: ${x.value}`));
+    console.error('');
+    console.error('   这通常是伪造或用错了团队的 ID。可用值：');
+    candidates.forEach(c => console.error(`   ${c.modelId}  (来自应用「${c.fromApp}」)`));
     process.exit(3);
   }
 
@@ -421,12 +481,19 @@ const commands = {
     try { built = buildFromDsl(dsl); } catch (e) { fail(e.message); }
     let { nodes, edges, chatConfig } = built;
 
-    // 预检：modelId 无效时自动填充或引导
+    // 预检：dry-run 纯静态（不触网），真实部署才做网络校验
     if (!f['no-model-hook']) {
-      nodes = await ensureModelIdHook(nodes, {
-        autoFill: !f['no-auto-model'],
-        allowModelName: !!f['allow-model-name']
-      });
+      if (f['dry-run']) {
+        if (!staticModelIdCheck(nodes)) {
+          out({ ok: false, stage: 'model-id', error: '模型 ID 是伪造值，无法继续' });
+          process.exit(2);
+        }
+      } else {
+        nodes = await ensureModelIdHook(nodes, {
+          autoFill: !f['no-auto-model'],
+          allowModelName: !!f['allow-model-name']
+        });
+      }
     }
 
     const v = validateWorkflow({ nodes, edges, chatConfig });

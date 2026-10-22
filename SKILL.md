@@ -17,6 +17,33 @@ description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI �
 | 看到 `{"code":200}` 就当成功 | `app/update` / `version/update` 是假保存，数据被静默 strip | 用 `wf build`，拉回校验 |
 | 自己算 handle id | `${nodeId}-source-${key}` 顺序反了 UI 不渲染，但运行时照样跑 | `edge()` 或 DSL 数组 |
 
+### 🚨 红线二：缺关键信息时，必须问用户，禁止绕过
+
+需要以下任一项但当前没有时，**停下来向用户索要**，不要用占位符或伪造值硬走：
+
+| 缺失项 | 正确做法 | 禁止做法 |
+|---|---|---|
+| `FASTGPT_BASE` | 问用户「你的 FastGPT 地址是什么？」 | 猜一个地址 |
+| 账号凭证 | 问用户「账号密码或 token？」 | 跳过登录直接写 DSL |
+| `modelId` | 运行 `fastgpt model id`，无结果则引导用户去 WebUI 操作 | ❌ **用 `0000...` 或任意 24 位 hex 伪造** |
+| `datasetId` | `fastgpt ds list` 让用户确认 | 编一个 ID |
+
+**为什么不能伪造 modelId**：校验器只能检查「格式是不是 24 位 hex」，
+`000000000000000000000000` 能通过格式校验，但部署后 100% 报
+`Model model is unavailable`。伪造等于让用户拿到一个跑不起来的半成品。
+
+真实部署时 CLI 会拿 DSL 里的 modelId 和团队真实候选比对，对不上直接 exit 3。
+
+### 🚨 红线三：dry-run 通过 ≠ 能用
+
+```
+wf build --dry-run  =  只校验结构（离线，0.03 秒）
+wf build            =  真实写库（需要登录、会校验 modelId）
+chat run            =  验证真的能跑
+```
+
+**`--dry-run` 通过不代表工作流可用。** 交付前必须真实部署 + `chat run` 验证。
+
 **唯一合法的建工作流方式**：
 
 ```bash
