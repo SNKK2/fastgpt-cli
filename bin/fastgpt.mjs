@@ -62,16 +62,28 @@ async function scanModelIds() {
  *   无可用值 → 打印可执行引导并中断
  * 返回修正后的 nodes。
  */
-async function ensureModelIdHook(nodes, { autoFill = true } = {}) {
+async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = false } = {}) {
+  const isPlaceholder = v => typeof v === 'string' && (/^\s*$/.test(v) || /^<.*>$/.test(v));
+  const isModelName = v => typeof v === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(v);
   const bad = [];
+  const nameOnly = [];
   for (const n of nodes) {
     for (const inp of n.inputs || []) {
       if (inp.key !== 'modelId') continue;
       const v = inp.value;
-      if (typeof v === 'string' && MODEL_ID_RE.test(v)) continue;
-      if (Array.isArray(v)) continue;  // 引用型，运行时解析
+      if (typeof v === 'string' && MODEL_ID_RE.test(v)) continue;  // 有效 ObjectId
+      if (Array.isArray(v)) continue;                              // 引用型
+      // 模型名（非占位符、非空、非 ObjectId）
+      if (allowModelName && isModelName(v) && !isPlaceholder(v)) { nameOnly.push({ node: n.nodeId, value: v }); continue; }
       bad.push({ node: n.nodeId, value: v });
     }
+  }
+  if (nameOnly.length) {
+    console.error('');
+    console.error('⚠️  --allow-model-name 已开启，以下节点使用模型名作为 modelId：');
+    nameOnly.forEach(x => console.error(`   ${x.node}: ${x.value}`));
+    console.error('   注意：部分 FastGPT 部署在发布时会报 Model model is unavailable。');
+    console.error('');
   }
   if (!bad.length) return nodes;
 
@@ -411,7 +423,10 @@ const commands = {
 
     // 预检：modelId 无效时自动填充或引导
     if (!f['no-model-hook']) {
-      nodes = await ensureModelIdHook(nodes, { autoFill: !f['no-auto-model'] });
+      nodes = await ensureModelIdHook(nodes, {
+        autoFill: !f['no-auto-model'],
+        allowModelName: !!f['allow-model-name']
+      });
     }
 
     const v = validateWorkflow({ nodes, edges, chatConfig });
