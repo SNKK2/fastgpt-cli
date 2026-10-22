@@ -173,6 +173,14 @@ const commands = {
     out({ ok: true, appId });
   },
 
+  async 'app delete'(args, f) {
+    const appId = f.appId || args[0];
+    if (!appId) fail('用法: app delete <appId>');
+    const ids = String(appId).split(',');
+    const deleted = await client.del(`/api/core/app/del?appId=${ids.join(',')}`);
+    out({ ok: true, deleted: Array.isArray(deleted) ? deleted : ids });
+  },
+
   async 'app detail'(args, f) {
     const appId = f.appId || args[0];
     if (!appId) fail('需要 appId');

@@ -215,6 +215,7 @@ fastgpt model list --type llm
 fastgpt app list
 fastgpt app create --name "我的工作流" --type advanced
 fastgpt app detail <appId>
+fastgpt app delete <appId>
 
 # 发布渠道（分享链接 / 嵌入 / API）
 fastgpt app share create --appId <id> --name "对外分享" --type share
