@@ -209,6 +209,15 @@ fastgpt apikey create --name cli
 fastgpt chat run --appId <id> -q "你们有什么产品？" --detail
 ```
 
+## 测试
+
+```bash
+npm test          # 离线回归：构造器 / 校验规则 / 错误契约 / _notice
+npm run test:all  # 加上 DSL 示例校验
+```
+
+62 项断言，全部离线，不触网。
+
 ## 目录
 
 ```
@@ -222,6 +231,8 @@ fastgpt-cli/
 ├── examples/
 │   ├── dsl-basic.json             意图识别 + 知识库问答双分支
 │   └── dsl-contract-review.json   文件解析 → 合同审查 → 批注版输出
+├── tests/
+│   └── smoke.mjs                  62 项离线回归测试
 ├── SKILL.md               agent 使用说明
 └── .fastgpt/              凭证（cookies.json / apikey），权限 600
 ```
