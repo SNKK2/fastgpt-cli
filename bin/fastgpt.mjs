@@ -689,7 +689,7 @@ const commands = {
   async 'auth login'(args, f) {
     const user = f.user || process.env.FASTGPT_USER;
     const pass = f.pass || process.env.FASTGPT_PASS;
-    // 无参数时走交互引导（密码 / 扫码 / 粘贴）
+    // 无参数时走交互引导（密码 / 扫码）
     if (!user || !pass) {
       if (!process.stdin.isTTY) {
         fail(
@@ -718,15 +718,6 @@ const commands = {
     const r = await scanLogin({ timeoutSec: Number(f.timeout) || 240, noWait: !!f['no-wait'] });
     if (r?.noWait) { out({ ok: true, ...r, action_required: 'user' }); return; }
     out({ ok: true, user: r.username, userId: r._id, team: r.team?.teamName, tmbId: r.team?.tmbId });
-  },
-
-  async 'auth cookie'(args, f) {
-    // 注入扫码登录的 fastgpt_token
-    const t = f.token || args[0];
-    if (!t) fail('需要 --token "<fastgpt_token 的值>"');
-    client.setCookie('fastgpt_token', t);
-    const me = await whoami();
-    out({ ok: true, user: me.username, userId: me._id });
   },
 
   async 'auth whoami'() {
@@ -1369,7 +1360,7 @@ const commands = {
         init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],
         doctor: ['环境自检：检查地址/登录/模型/知识库是否就绪'],
         info: ['环境快照（人类可读）：用户/团队/配额/资源/能力', 'info --deep  含工作流与知识库明细', 'info --json  输出结构化数据（给 agent）'],
-        auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--no-wait]（打开浏览器扫码）', 'scan --wait --session-id <id>（第二轮确认）', 'cookie --token', 'whoami', 'logout'],
+        auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--no-wait]（打开浏览器扫码）', 'scan --wait --session-id <id>（第二轮确认）', 'whoami', 'logout'],
         model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
         wf: ['build <dsl.json> [--dry-run]', 'validate <json>', 'get <appId> [--out f]', 'publish <appId>'],

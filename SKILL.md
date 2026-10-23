@@ -84,7 +84,7 @@ node bin/fastgpt.mjs doctor    # 环境自检：现在能不能干活
 `init` 会引导你完成两件事，写入 `~/.fastgpt/config.json`（权限 600）：
 
 1. 服务地址（如 `https://your-fastgpt-host`）
-2. 登录方式（账号密码 / 浏览器扫码 / 粘贴 token）
+2. 登录方式（账号密码 / 浏览器扫码）
 
 非交互环境（agent 调用）用参数形式：
 
@@ -337,21 +337,21 @@ fastgpt auth scan --wait --session-id 9460
 未登录或登录已失效，请选择登录方式：
   1) 账号密码登录
   2) 打开浏览器扫码（微信/企业微信账号）
-  3) 手动粘贴 fastgpt_token
+
 ```
 
-三种方式也可直接指定：
+两种方式也可直接指定：
 
 ```bash
 # 密码登录
 fastgpt auth login --user 138xxxx --pass '明文密码'
 
-# 扫码登录（自动开浏览器 + 抓 httpOnly cookie，最长等 240s）
+# 扫码登录（自动开浏览器 + 抓 httpOnly cookie）
 fastgpt auth scan
-
-# 手动粘贴（扫码后从 F12 复制 fastgpt_token）
-fastgpt auth cookie --token 'xxxxx...%3Axxxxx'
 ```
+
+**没有第三条路**。token 是这两种登录方式的结果，不是一种输入。
+不要去找 token、不要复用别人的 cookie、不要从浏览器手工复制。
 
 验证：
 
@@ -366,7 +366,7 @@ fastgpt auth whoami    # 返回 _id / username / team
 ```json
 {
   "ok": false,
-  "error": "未登录或登录已失效。请先执行其中之一：\n  fastgpt auth login --user <账号> --pass <密码>\n  fastgpt auth scan              # 打开浏览器扫码\n  fastgpt auth cookie --token <fastgpt_token>",
+  "error": "未登录或登录已失效。请先执行其中之一：\n  fastgpt auth login --user <账号> --pass <密码>\n  fastgpt auth scan              # 打开浏览器扫码",
   "code": 401
 }
 ```
@@ -422,7 +422,6 @@ fastgpt doctor
 fastgpt auth login --user U --pass P
 fastgpt auth scan --no-wait                        # 第一轮
 fastgpt auth scan --wait --session-id <id>         # 第二轮
-fastgpt auth cookie --token T
 fastgpt auth whoami
 
 # 模型

@@ -200,7 +200,7 @@ fastgpt-cli/
 ├── bin/fastgpt.mjs        CLI 入口 + 命令分发
 ├── lib/
 │   ├── client.mjs         HTTP / CSRF / 错误归一
-│   ├── auth.mjs           认证引导：密码 / 扫码(CDP) / 粘贴
+│   ├── auth.mjs           认证引导：密码 / 扫码(CDP)
 │   ├── nodes.mjs          节点构造器（9 种节点）
 │   └── validate.mjs       连线构造器 + 保存前硬校验
 ├── examples/
