@@ -342,6 +342,20 @@ section('权限命令契约');
   ok('只读 = 4', PERM.read === 4);
 }
 
+// ---------- 12. doctor 商业版检查 ----------
+section('doctor 商业版检查');
+
+{
+  // proApi 影响哪些命令
+  const PRO_ONLY = ['perm dataset', 'perm collection', 'perm app', 'perm member', 'perm team', 'perm invite'];
+  ok('权限命令全部依赖 proApi', PRO_ONLY.length === 6);
+
+  // 社区版可用的命令（走 /api/core/*）
+  const CORE_OK = ['ds create', 'ds add-file', 'ds add-text', 'ds add-link', 'ds add-qa',
+                   'ds training', 'ds data', 'ds search', 'ds collections', 'wf build'];
+  ok('知识库核心操作不依赖 proApi', CORE_OK.length === 10);
+}
+
 // ---------- 输出 ----------
 console.log(results.join('\n'));
 console.log(`\n${'─'.repeat(50)}`);

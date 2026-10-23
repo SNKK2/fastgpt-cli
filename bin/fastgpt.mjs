@@ -745,7 +745,43 @@ const commands = {
 
     // 3. 登录
     const me = base ? await checkAuth().catch(() => null) : null;
-    add('登录状态', !!me, me ? `${me.username} / ${me.team?.teamName}` : '未登录', 'fastgpt init');
+    add('登录状态', !!me, me ? `${me.username} / ${me.team?.teamName}` : '未登录', me ? null : 'fastgpt init');
+
+    // 3.5 商业版 API（proApi）—— 权限相关命令全依赖它
+    if (me) {
+      let proOk = false, proDetail = '', proFix = null;
+      try {
+        const r = await fetch(getBase() + '/api/proApi/support/user/team/member/count', {
+          headers: { Cookie: client.cookieHeader, 'fastgpt-web-request': 'fastgpt' },
+          signal: AbortSignal.timeout(8000)
+        });
+        const text = await r.text();
+        let j = null; try { j = JSON.parse(text); } catch {}
+        if (j?.code === 200) {
+          proOk = true; proDetail = '可用';
+        } else if (/未配置商业版链接|FastGPTProUrl|pro.*url/i.test(text)) {
+          proDetail = '未配置商业版（FastGPTProUrl 为空）';
+          proFix = '当前是社区版。权限命令不可用：perm dataset/collection/app/member/team/invite ' +
+                   '全部走 proApi，只有创建/上传/训练/检索这些 /api/core/* 能用。' +
+                   '需要权限功能请升级到商业版并配置 FASTGPT_PRO_URL';
+        } else if (r.status === 404) {
+          proDetail = 'proApi 路由不存在（HTTP 404）';
+          proFix = '当前版本没有商业版接口。权限命令不可用，其余命令正常';
+        } else if (j?.code === 401 || j?.code === 403) {
+          proDetail = `商业版 API 拒绝（${j?.message || r.status}）`;
+          proFix = '检查登录状态；部分商业版功能需要对应套餐';
+        } else {
+          proDetail = `HTTP ${r.status} ${String(j?.message || '').slice(0, 60)}`;
+          proFix = '权限命令可能不可用，其余命令不受影响';
+        }
+      } catch (e) {
+        proDetail = e.message;
+        proFix = '网络异常或 proApi 不可达';
+      }
+      add('商业版 API', proOk, proDetail, proFix);
+    } else {
+      add('商业版 API', false, '跳过（未登录）', 'fastgpt init');
+    }
 
     // 4. 模型可用性（能否拿到 modelId）
     let modelIds = [];
