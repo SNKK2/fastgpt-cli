@@ -1171,6 +1171,23 @@ const commands = {
     out({ ok: true, datasetId: id });
   },
 
+  /** 查自己对某个资源有什么权限（只读/读写/管理） */
+  async 'ds permission'(args, f) {
+    const id = f.id || args[0];
+    if (!id) fail('用法: ds permission <datasetId>');
+    const d = await client.get(`/api/core/dataset/getPermission?id=${id}`);
+    const p = d?.permission || {};
+    out({
+      datasetId: id,
+      name: d?.datasetName,
+      read: !!p.hasReadPer,
+      write: !!p.hasWritePer,
+      manage: !!p.hasManagePer,
+      raw: p,
+      canSetCollaborator: !!p.hasManagePer
+    });
+  },
+
   async 'ds detail'(args, f) {
     const id = f.id || args[0];
     const d = await client.get(`/api/core/dataset/detail?id=${id}`);
@@ -1472,10 +1489,25 @@ const commands = {
     const id = f.id || args[0];
     if (f.set) {
       const [tmbId, perm] = String(f.set).split(':');
+      if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（1管理 2写 4读，相加）');
+      // 预检：后端只会返回误导性的 can_not_edit_admin_permission
+      const mine = await client.get(`/api/core/dataset/getPermission?id=${id}`);
+      if (!mine?.permission?.hasManagePer) {
+        const e = cliError('no_manage_permission', {
+          details: { datasetId: id, myPermission: mine?.permission || {} }
+        });
+        console.error('');
+        console.error('❌ ' + e.message);
+        console.error('');
+        console.error(e.hint);
+        console.error('');
+        out(e.toEnvelope());
+        process.exit(exitCodeFor(e));
+      }
       await client.put('/api/proApi/core/dataset/collaborator/update', {
         datasetId: id, collaborators: [{ tmbId, permission: Number(perm) }]
       });
-      out({ ok: true });
+      out({ ok: true, datasetId: id, tmbId, permission: Number(perm) });
     } else {
       const d = await client.get(`/api/proApi/core/dataset/collaborator/list?datasetId=${id}`);
       out((d.clbs || []).map(c => ({ tmbId: c.tmbId, permission: c.permission?.permission,
@@ -1503,6 +1535,18 @@ const commands = {
     if (f.set) {
       const [tmbId, perm] = String(f.set).split(':');
       if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（权限 1管理 2写 4读，相加）');
+      const mine = await client.get(`/api/core/app/detail?appId=${id}`);
+      const hasManage = mine?.permission?.hasManagePer ?? mine?.permission?.isOwner;
+      if (!hasManage) {
+        const e = cliError('no_manage_permission', {
+          message: '你没有这个应用的管理权，无法配置协作者',
+          details: { appId: id, myPermission: mine?.permission || {} }
+        });
+        console.error(''); console.error('❌ ' + e.message); console.error('');
+        console.error(e.hint); console.error('');
+        out(e.toEnvelope());
+        process.exit(exitCodeFor(e));
+      }
       await client.put('/api/proApi/core/app/collaborator/update', {
         appId: id, collaborators: [{ tmbId, permission: Number(perm) }]
       });
@@ -1679,7 +1723,8 @@ const commands = {
           'get <appId> [--out f]',
           'publish <appId>'
         ],
-        ds: ['list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
+        ds: [
+          'permission <datasetId>                      查自己的读写/管理权限','list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
         perm: [
           'dataset <id> [--set tmbId:6]              查/设知识库协作者',
           'collection <id> [--set tmbId:6]           查/设集合协作者',
