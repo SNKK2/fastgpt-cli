@@ -154,6 +154,28 @@ answer:     (空)
 **取舍**：接了 `answerNode` 会失去流式效果（`answerNode` 走 `fastAnswer` 一次性输出）。
 如果要流式，就不要接 `answerNode`，让 `chatNode` 直接输出。
 
+### 重复引用检测
+
+多个 `answerNode` 引用同一个输出时，校验器会判断它们是否互斥：
+
+| 情况 | 判定 | 结果 |
+|---|---|---|
+| 同一路径上两个 answer 引用同一输出 | 会同时执行 | ❌ ERROR，拒绝部署 |
+| 分属同一 classify 的不同分支 | 互斥，一次只走一条 | ⚠️ WARNING，可忽略 |
+| 各自引用不同的 chat 输出 | 无冲突 | 通过 |
+
+错误示例：
+
+```
+ERROR: 多个 answerNode 引用同一输出 n_chat:answerText（n_a1, n_a2），
+这些节点可能同时执行，导致同一条回复输出多次。
+请只保留一个，或让它们挂到互斥的分支上
+```
+
+判定方法：从每个 answerNode 向上游回溯，收集途经的分支选择
+（`sourceHandle` 为 `-source-<key>` 的边）。若两个节点经过同一 classify
+下的不同 key，则互斥。
+
 ## 错误契约（agent 必读）
 
 所有错误都是结构化 envelope，**`hint` 就是操作指令，`action_required` 决定你该做什么**：

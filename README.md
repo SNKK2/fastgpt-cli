@@ -38,6 +38,11 @@ $ fastgpt doctor
 
 不调整的后果：`chatNode` 流式输出一次 + `answerNode` 再输出一次 = **同一条回复显示两遍**。
 
+同时校验器会检测「多个 answerNode 引用同一输出」：
+
+- 同一路径上 → ERROR（会同时执行，重复输出）
+- 分属互斥分支 → WARNING（可忽略）
+
 ## 错误契约
 
 所有错误都是结构化 JSON，`hint` 就是下一步操作，`action_required` 决定谁来处理：
