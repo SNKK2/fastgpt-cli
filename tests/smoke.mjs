@@ -291,6 +291,18 @@ section('未发布提示');
   ok('app_not_published 有 next_command', !!e.toEnvelope().error.next_command);
 }
 
+// ---------- 9. base 地址纠错 ----------
+section('base 地址纠错');
+
+{
+  const e = cliError('base_looks_like_website');
+  const env = e.toEnvelope().error;
+  ok('base_looks_like_website 指出 fastgpt.cn 是官网', /fastgpt\.cn.*官网/.test(env.hint || ''));
+  ok('base_looks_like_website 给出 cloud.fastgpt.cn', /cloud\.fastgpt\.cn/.test(env.hint || ''));
+  ok('base_looks_like_website 建议用 preset', /--preset cn/.test(env.next_command || ''));
+  ok('base_looks_like_website 的 next 是 init', /fastgpt init/.test(env.next_command || ''));
+}
+
 // ---------- 输出 ----------
 console.log(results.join('\n'));
 console.log(`\n${'─'.repeat(50)}`);

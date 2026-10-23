@@ -346,6 +346,31 @@ const commands = {
 
       if (!base) base = f.base || process.env.FASTGPT_BASE || getBase();
 
+      // 校验 base 是否真的是 FastGPT 服务端（不是官网/文档站）
+      if (base) {
+        const norm = String(base).replace(/\/+$/, '');
+        const knownWebsite = /^https?:\/\/(www\.)?fastgpt\.(cn|io)$/i.test(norm);
+        const probeUrl = `${norm}/api/support/user/account/preLogin?username=probe`;
+        let alive = false;
+        try {
+          const r = await fetch(probeUrl, { signal: AbortSignal.timeout(5000) });
+          alive = r.ok || r.status === 400 || r.status === 401;
+        } catch {}
+
+        if (!alive) {
+          const e = cliError(knownWebsite ? 'base_looks_like_website' : 'base_unreachable', {
+            details: { base: norm, probed: probeUrl }
+          });
+          console.error('');
+          console.error('❌ ' + e.message);
+          console.error('');
+          console.error(e.hint);
+          console.error('');
+          out(e.toEnvelope());
+          process.exit(exitCodeFor(e));
+        }
+      }
+
       if (!base) {
         if (!rl) {
           failCli('not_configured', {
@@ -667,12 +692,30 @@ const commands = {
     add('服务地址', !!base, base || '未配置',
       base ? null : 'fastgpt init --preset cn|global|local，或 --preset private --base <地址>');
 
-    // 2. 可达性
+    // 2. 可达性 —— 必须是真的 FastGPT 服务端，不是官网页面
     if (base) {
       const t0 = Date.now();
+      const norm = String(base).replace(/\/+$/, '');
+      const isWebsite = /^https?:\/\/(www\.)?fastgpt\.(cn|io)$/i.test(norm);
       try {
-        await fetch(base + '/api/common/system/getInitData', { signal: AbortSignal.timeout(8000) });
-        add('服务可达', true, `${Date.now() - t0}ms`);
+        const r = await fetch(norm + '/api/common/system/getInitData', { signal: AbortSignal.timeout(8000) });
+        const ms = Date.now() - t0;
+        if (!r.ok) {
+          add('服务可达', false, `HTTP ${r.status}（${base} 不是 FastGPT 服务端）`,
+            isWebsite
+              ? 'fastgpt.cn / fastgpt.io 是官网。用 fastgpt init --preset cn（cloud.fastgpt.cn）或 --preset global（cloud.fastgpt.io）'
+              : '确认地址是否带 /api 前缀错误，或服务是否启动');
+        } else {
+          const text = await r.text();
+          let parsed = null;
+          try { parsed = JSON.parse(text); } catch {}
+          if (parsed?.code === 200) {
+            add('服务可达', true, `${ms}ms`, null);
+          } else {
+            add('服务可达', false, '返回的不是 FastGPT API 响应（可能撞上了前端页面）',
+              '检查 base 是否正确：国内 cloud.fastgpt.cn / 海外 cloud.fastgpt.io');
+          }
+        }
       } catch (e) {
         add('服务可达', false, e.message, '检查 FASTGPT_BASE 与网络');
       }
