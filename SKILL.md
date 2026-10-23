@@ -123,6 +123,49 @@ node "$CLI_ROOT/bin/fastgpt.mjs" help
 cd "$CLI_ROOT" && npm link
 ```
 
+## 环境快照
+
+登录后自动展示，也可随时运行：
+
+```bash
+fastgpt info            # 人类可读
+fastgpt info --deep     # 含工作流/知识库明细（约 2 秒）
+fastgpt info --json     # 结构化，给 agent 解析
+```
+
+人类可读版长这样：
+
+```
+  FastGPT 环境
+  ──────────────────────────────────────────────
+  用户      wechat-o5Ljw6
+  团队      fastgpt 团队
+  身份      可写成员
+  套餐      standard（到期 2028-06-19）
+  积分      剩余 925,978 / 共 2,169,999
+
+  资源
+  ──────────────────────────────────────────────
+  工作流    23 个（其中高级编排 18）
+  知识库    5 个（另有 4 个文件夹）
+  文档      23 篇（5 个知识库有内容）
+  应用总数  49 个（含插件 12、工具集 9）
+  成员      55 人
+  模型      31 个 LLM，7 个向量模型
+  可用模型  10 个 modelId 可提取
+
+  能力
+  ──────────────────────────────────────────────
+  ✓ 创建 / 编辑工作流
+  ✓ 创建知识库
+  ✓ 创建 API Key
+  ✗ 管理成员与权限
+  ✗ 新增模型
+```
+
+**agent 用 `--json`**，字段：`identity` / `team` / `permissions` / `plan` /
+`members` / `models` / `apps` / `datasets` / `apiKeys` / `ready` / `summary`。
+
 ## 内在参数自动调整
 
 DSL 里有几类参数**不写就会出错**，`wf build` 会按节点依赖关系自动修正：
@@ -242,7 +285,8 @@ fastgpt auth scan --wait --session-id 9460
 
 按这个顺序做，不要跳步：
 
-0. `doctor` —— **先跑这个**，一次看清地址/登录/模型/知识库是否就绪
+0. `doctor` —— 先跑这个，确认能不能干活
+0.5 `info` —— 看清家底（成员数、工作流数、知识库数、配额、权限）
 1. `auth whoami` 确认身份、拿 teamId/tmbId
 2. `wf get <任意已有应用>` 提取 `<LLM_MODEL_OBJECT_ID>`（不要猜）
 3. `ds list` 拿知识库 ID（如果要用 RAG）

@@ -332,19 +332,267 @@ const commands = {
 
       // 2. 登录
       const me = await ensureAuth({ interactive: !!rl, user: f.user, pass: f.pass });
-      out({
-        ok: true,
-        base,
-        config: CONFIG_PATH,
-        home: HOME,
-        user: me.username,
-        userId: me._id,
-        team: me.team?.teamName,
-        tmbId: me.team?.tmbId
-      });
+
+      if (f['no-info']) {
+        out({ ok: true, base, config: CONFIG_PATH, user: me.username, team: me.team?.teamName });
+        return;
+      }
+
+      // 3. 登录成功后自动展示环境快照（默认人类可读）
+      console.error(`\n✓ 已连接 ${base}（${me.username} / ${me.team?.teamName}）`);
+      console.error('  正在读取环境信息…\n');
+      await commands['info']([], {});
     } finally {
       rl?.close();
     }
+  },
+
+  /**
+   * 环境快照：账号连上后一次性摸清家底。
+   * 默认快速版（只拉列表做统计），--deep 才逐个拉应用/知识库详情。
+   */
+  async 'info'(args, f) {
+    const deep = !!f.deep;
+    const t0 = Date.now();
+    const R = {};   // 各项结果
+    const errs = [];
+
+    const safe = async (name, fn) => {
+      try { return await fn(); } catch (e) { errs.push({ part: name, error: e.message }); return null; }
+    };
+
+    // 并发拉取基础数据
+    const [me, plan, members, modelsData, appsData, dsData, keysData] = await Promise.all([
+      safe('identity', () => client.get('/api/support/user/account/tokenLogin')),
+      safe('plan', () => client.get('/api/support/user/team/plan/getTeamPlanStatus')),
+      safe('members', async () => {
+        const first = await client.post('/api/proApi/support/user/team/member/list', { teamId: null, searchKey: '', pageNum: 1, pageSize: 100 });
+        return first;
+      }),
+      safe('models', () => client.get('/api/core/ai/model/list')),
+      safe('apps', () => client.post('/api/core/app/listV2', { parentId: null, searchKey: '' })),
+      safe('datasets', () => client.post('/api/core/dataset/list', { parentId: null, searchKey: '' })),
+      safe('apiKeys', () => client.post('/api/support/openapi/list', { appId: null }))
+    ]);
+
+    // ---- 身份与权限 ----
+    let identity = null, team = null, permissions = null;
+    if (me) {
+      const t = me.team || {};
+      identity = {
+        username: me.username, userId: me._id,
+        timezone: me.timezone, language: me.language,
+        hasPassword: !!me.hasPassword
+      };
+      team = { name: t.teamName, teamId: t.teamId, tmbId: t.tmbId, balance: t.balance, status: t.status };
+      const p = t.permission || {};
+      permissions = Object.fromEntries(
+        Object.entries(p).filter(([, v]) => typeof v === 'boolean')
+      );
+    }
+
+    // ---- 套餐 ----
+    let planInfo = null;
+    if (plan?.standard) {
+      const s = plan.standard;
+      planInfo = {
+        type: s.type, expiredTime: s.expiredTime,
+        maxTeamMember: s.maxTeamMember,
+        totalPoints: s.totalPoints,
+        surplusPoints: s.surplusPoints != null ? Math.round(s.surplusPoints) : null
+      };
+    }
+
+    // ---- 成员 ----
+    let memberInfo = null;
+    if (members) {
+      const list = members.list || [];
+      const byRole = {};
+      for (const m of list) { const r = m.role || 'member'; byRole[r] = (byRole[r] || 0) + 1; }
+      memberInfo = { total: members.total ?? list.length, byRole };
+    }
+
+    // ---- 模型 ----
+    let modelInfo = null;
+    if (modelsData) {
+      const ms = modelsData.models || [];
+      const byType = {};
+      for (const m of ms) byType[m.type] = (byType[m.type] || 0) + 1;
+      modelInfo = { total: ms.length, byType, llmNames: ms.filter(m => m.type === 'llm').map(m => m.name).slice(0, 5) };
+    }
+
+    // ---- 应用 ----
+    let appInfo = null;
+    const appList = appsData?.list || appsData || [];
+    if (appsData) {
+      const byType = {};
+      for (const a of appList) byType[a.type] = (byType[a.type] || 0) + 1;
+      appInfo = { total: appList.length, byType };
+    }
+
+    // ---- 知识库 ----
+    let dsInfo = null;
+    const dsList = dsData || [];
+    if (dsData) {
+      const byType = {}, byVector = {};
+      for (const d of dsList) {
+        byType[d.type] = (byType[d.type] || 0) + 1;
+        const vm = typeof d.vectorModel === 'string' ? d.vectorModel : d.vectorModel?.name;
+        if (vm) byVector[vm] = (byVector[vm] || 0) + 1;
+      }
+      dsInfo = { total: dsList.length, byType, byVectorModel: byVector };
+    }
+
+    // ---- API Key ----
+    let keyInfo = null;
+    if (keysData) keyInfo = { total: (keysData || []).length };
+
+    // ---- 深度扫描 ----
+    let deepInfo = null;
+    if (deep) {
+      const wfApps = appList.filter(a => ['advanced', 'simple', 'chatAgent'].includes(a.type));
+      const modelIds = new Set();
+      const topologies = [];
+      for (const a of wfApps) {
+        try {
+          const d = await client.get(`/api/core/app/detail?appId=${a._id}`);
+          for (const n of d.nodes || []) {
+            for (const inp of n.inputs || []) {
+              if (inp.key === 'modelId' && typeof inp.value === 'string' && /^[0-9a-f]{24}$/i.test(inp.value)) {
+                modelIds.add(inp.value);
+              }
+            }
+          }
+          topologies.push({
+            appId: a._id, name: a.name, type: a.type,
+            nodes: (d.nodes || []).length, edges: (d.edges || []).length,
+            published: !!d.publishedVersionId,
+            nodeTypes: [...new Set((d.nodes || []).map(n => n.flowNodeType))]
+          });
+        } catch {}
+      }
+      const dsDetails = [];
+      for (const d of dsList.filter(x => x.type === 'dataset')) {
+        try {
+          const cols = await client.post('/api/core/dataset/collection/listV2', {
+            datasetId: d._id, parentId: null, pageNum: 1, pageSize: 1
+          });
+          dsDetails.push({ datasetId: d._id, name: d.name, documents: cols.total ?? 0 });
+        } catch {}
+      }
+      deepInfo = { modelIds: [...modelIds], workflows: topologies, datasets: dsDetails };
+    }
+
+    const modelIdCount = deepInfo ? deepInfo.modelIds.length : (modelInfo ? '未知（加 --deep 统计）' : 0);
+    const ready = !!me && (deep ? deepInfo.modelIds.length > 0 : true);
+
+    const payload = {
+      ok: !errs.length,
+      base: getBase(),
+      elapsed: `${Date.now() - t0}ms`,
+      identity, team, permissions, plan: planInfo,
+      members: memberInfo, models: modelInfo,
+      apps: appInfo, datasets: dsInfo, apiKeys: keyInfo,
+      ...(deepInfo ? { deep: deepInfo } : {}),
+      ready,
+      summary: !me
+        ? '未登录，无法获取信息'
+        : `${memberInfo?.total ?? '?'} 名成员 / ${modelInfo?.total ?? '?'} 个模型 / ${appInfo?.total ?? '?'} 个应用 / ${dsInfo?.total ?? '?'} 个知识库`
+            + (planInfo?.surplusPoints != null ? ` / 剩余积分 ${planInfo.surplusPoints}` : '')
+            + (deep ? ` / ${deepInfo.modelIds.length} 个可用 modelId` : ''),
+      ...(errs.length ? { errors: errs } : {})
+    };
+
+    if (f.json) { out(payload); return; }
+    if (!me) { out(payload); return; }
+
+    // ---- 人类可读呈现 ----
+    const num = n => n == null ? '-' : n.toLocaleString('en-US');
+    const pad = (s, w) => {
+      // 中文字符占 2 列，做个简单对齐
+      const width = [...String(s)].reduce((a, c) => a + (c.charCodeAt(0) > 255 ? 2 : 1), 0);
+      return String(s) + ' '.repeat(Math.max(0, w - width));
+    };
+    const L = [];
+    const line = '─'.repeat(46);
+
+    L.push('');
+    L.push('  FastGPT 环境');
+    L.push('  ' + line);
+
+    L.push(`  ${pad('用户', 10)}${identity.username}`);
+    L.push(`  ${pad('团队', 10)}${team.name}`);
+    const roleText = permissions?.isOwner ? '管理员（owner）'
+      : permissions?.hasManagePer ? '管理员'
+      : permissions?.hasWritePer ? '可写成员'
+      : '只读成员';
+    L.push(`  ${pad('身份', 10)}${roleText}`);
+
+    if (planInfo) {
+      const exp = planInfo.expiredTime ? new Date(planInfo.expiredTime).toISOString().slice(0, 10) : '-';
+      L.push(`  ${pad('套餐', 10)}${planInfo.type}（到期 ${exp}）`);
+      if (planInfo.surplusPoints != null) {
+        L.push(`  ${pad('积分', 10)}剩余 ${num(planInfo.surplusPoints)} / 共 ${num(planInfo.totalPoints)}`);
+      }
+    }
+    L.push('');
+
+    L.push('  资源');
+    L.push('  ' + line);
+    const appTypes = appInfo?.byType || {};
+    const wfCount = (appTypes.advanced || 0) + (appTypes.simple || 0) + (appTypes.chatAgent || 0);
+    L.push(`  ${pad('工作流', 10)}${wfCount} 个${appTypes.advanced ? `（其中高级编排 ${appTypes.advanced}）` : ''}`);
+    const dsTypes = dsInfo?.byType || {};
+    L.push(`  ${pad('知识库', 10)}${dsTypes.dataset || 0} 个${dsTypes.folder ? `（另有 ${dsTypes.folder} 个文件夹）` : ''}`);
+    if (deepInfo?.datasets?.length) {
+      const withDocs = deepInfo.datasets.filter(d => d.documents > 0).length;
+      const totalDocs = deepInfo.datasets.reduce((a, d) => a + d.documents, 0);
+      L.push(`  ${pad('文档', 10)}${totalDocs} 篇（${withDocs} 个知识库有内容）`);
+    }
+    L.push(`  ${pad('应用总数', 10)}${appInfo?.total ?? 0} 个（含插件 ${appTypes.plugin || 0}、工具集 ${(appTypes.toolSet || 0) + (appTypes.toolFolder || 0)}）`);
+    L.push(`  ${pad('成员', 10)}${memberInfo?.total ?? 0} 人`);
+    const llmCount = modelInfo?.byType?.llm || 0;
+    L.push(`  ${pad('模型', 10)}${llmCount} 个 LLM${modelInfo?.byType?.embedding ? `，${modelInfo.byType.embedding} 个向量模型` : ''}`);
+    if (deepInfo) {
+      L.push(`  ${pad('可用模型', 10)}${deepInfo.modelIds.length} 个 modelId 可提取`);
+    }
+    L.push('');
+
+    L.push('  能力');
+    L.push('  ' + line);
+    const cap = (ok, text) => L.push(`  ${ok ? '✓' : '✗'} ${text}`);
+    cap(permissions?.hasWritePer !== false, '创建 / 编辑工作流');
+    cap(permissions?.hasDatasetCreatePer !== false, '创建知识库');
+    cap(permissions?.hasApikeyCreatePer !== false, '创建 API Key');
+    cap(!!permissions?.hasManagePer, '管理成员与权限');
+    cap(!!permissions?.hasModelCreatePer, '新增模型');
+    L.push('');
+
+    if (deepInfo?.workflows?.length) {
+      L.push('  工作流明细');
+      L.push('  ' + line);
+      for (const w of deepInfo.workflows.slice(0, 12)) {
+        L.push(`  ${pad(w.name.slice(0, 16), 20)}${w.nodes} 节点 / ${w.edges} 连线 ${w.published ? '已发布' : '草稿'}`);
+      }
+      if (deepInfo.workflows.length > 12) L.push(`  … 另有 ${deepInfo.workflows.length - 12} 个`);
+      L.push('');
+    }
+
+    if (deepInfo?.datasets?.length) {
+      L.push('  知识库明细');
+      L.push('  ' + line);
+      for (const d of deepInfo.datasets) {
+        L.push(`  ${pad(d.name.slice(0, 16), 20)}${d.documents} 篇文档`);
+      }
+      L.push('');
+    }
+
+    if (!ready) {
+      L.push('  ⚠ 环境未就绪，运行 fastgpt doctor 查看原因');
+      L.push('');
+    }
+
+    console.log(L.join('\n'));
   },
 
   /**
@@ -1105,6 +1353,7 @@ const commands = {
       groups: {
         init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],
         doctor: ['环境自检：检查地址/登录/模型/知识库是否就绪'],
+        info: ['环境快照（人类可读）：用户/团队/配额/资源/能力', 'info --deep  含工作流与知识库明细', 'info --json  输出结构化数据（给 agent）'],
         auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--no-wait]（打开浏览器扫码）', 'scan --wait --session-id <id>（第二轮确认）', 'cookie --token', 'whoami', 'logout'],
         model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
@@ -1139,7 +1388,7 @@ if (!fn) { out({ ok: false, error: `未知命令: ${pos.slice(0, 3).join(' ')}` 
 // 已消费的参数层级
 const consumed = key.split(' ').length;
 // 离线命令：不触网，不需要鉴权
-const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' || pos[0] === 'doctor' || !pos[0];
+const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' || pos[0] === 'doctor' || pos[0] === 'info' || !pos[0];
 const offlineCmds = new Set(['wf validate']);
 const isOffline = offlineCmds.has(key) || (key === 'wf build' && flags['dry-run']);
 
