@@ -636,13 +636,16 @@ fastgpt chat run --appId <id> -q "问题" --detail
 
 ## 工作流 DSL
 
+> `"publish": true` 是默认行为（不写就是 true）。**只有要存草稿才显式写 false** ——
+> 草稿状态下 `chat run` 会一直等到超时，因为对话接口只认已发布版本。
+
 最小可用示例（意图识别 + 知识库问答 + 闲聊双分支）：
 
 ```json
 {
   "appId": "<APP_ID>",
   "versionName": "v1",
-  "publish": false,
+  "publish": true,
   "nodes": [
     { "type": "start", "id": "n_start" },
     { "type": "classify", "id": "n_classify",

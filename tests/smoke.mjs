@@ -278,6 +278,19 @@ section('强制停止层');
   ok('blockEnvelope 保持 dead_end', env.error.dead_end === true);
 }
 
+// ---------- 8. 未发布提示 ----------
+section('未发布提示');
+
+{
+  const n = Notice.notPublished('APP_ID');
+  ok('notPublished 提示 chat run 会超时', /chat run 会一直等到超时/.test(n.message));
+  ok('notPublished 给出 publish 命令', /wf publish APP_ID/.test(n.hint));
+  ok('notPublished 说明默认是发布', /默认就是发布/.test(n.hint));
+
+  const e = cliError('app_not_published');
+  ok('app_not_published 有 next_command', !!e.toEnvelope().error.next_command);
+}
+
 // ---------- 输出 ----------
 console.log(results.join('\n'));
 console.log(`\n${'─'.repeat(50)}`);

@@ -1006,12 +1006,16 @@ const commands = {
       return;
     }
 
+    // publish 默认 true：用户说「要能直接拿来用」就是发布状态
+    const published = dsl.publish !== false;
     await client.post(`/api/core/app/version/publish?appId=${appId}`, {
       nodes, edges, chatConfig,
-      isPublish: !!dsl.publish, autoSave: !dsl.publish,
+      isPublish: published, autoSave: !published,
       versionName: dsl.versionName || 'v1'
     });
-    out({ ok: true, appId, nodes: nodes.length, edges: edges.length, publish: !!dsl.publish, warnings: v.warnings });
+    const payload = { ok: true, appId, nodes: nodes.length, edges: edges.length,
+                      publish: published, warnings: v.warnings };
+    out(published ? payload : withNotice(payload, Notice.notPublished()));
   },
 
   /** 纯语法检查：离线，不验证 ID 真实性，不代表可部署 */
@@ -1455,6 +1459,19 @@ const commands = {
         messages: [{ role: 'user', content: q }]
       })
     });
+    if (!res.ok) {
+      let body = '';
+      try { body = await res.text(); } catch {}
+      let detail = {};
+      try { detail = JSON.parse(body); } catch {}
+      const msg = detail?.message || body.slice(0, 200);
+      if (/not.publish|未发布|no.*version|版本不存在/i.test(msg) || res.status === 404) {
+        const e = cliError('app_not_published');
+        out({ ...e.toEnvelope(), details: { appId, status: res.status, response: msg } });
+        process.exit(exitCodeFor(e));
+      }
+      fail(`对话接口返回 ${res.status}: ${msg}`);
+    }
     const text = await res.text();
     // 解析 SSE
     let answer = '', trace = [];
