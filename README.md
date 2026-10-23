@@ -92,6 +92,22 @@ $ fastgpt doctor
 - 同一路径上 → ERROR（会同时执行，重复输出）
 - 分属互斥分支 → WARNING（可忽略）
 
+## 成功响应也带提示
+
+操作成功 ≠ 可以往下走。关键命令会在 `_notice` 里给下一步：
+
+```json
+{ "ok": true, "dryRun": true, "nodes": 5, "edges": 4,
+  "_notice": {
+    "type": "dry_run_only",
+    "message": "dry-run 只校验了结构，没有写库、没有验证 modelId 真实性",
+    "hint": "下一步：去掉 --dry-run 真实部署，然后 fastgpt chat run 验证能跑通"
+  } }
+```
+
+覆盖 5 个容易踩坑的成功场景：dry-run 完成后、应用刚创建、
+文档刚上传（训练异步）、检索空结果、对话空回答。
+
 ## 错误契约
 
 所有错误都是结构化 JSON，`hint` 就是下一步操作，`action_required` 决定谁来处理：

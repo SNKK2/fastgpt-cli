@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
-import { cliError, exitCodeFor, isCliError, BASE_PRESETS } from '../lib/errors.mjs';
+import { cliError, exitCodeFor, isCliError, BASE_PRESETS, Notice, withNotice } from '../lib/errors.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
@@ -843,7 +843,7 @@ const commands = {
     const appId = await client.post('/api/core/app/create', {
       name, type, avatar: f.avatar || 'core/app/type/workflowFill', intro: f.intro || ''
     });
-    out({ ok: true, appId });
+    out(withNotice({ ok: true, appId }, Notice.appCreated(appId)));
   },
 
   async 'app delete'(args, f) {
@@ -974,7 +974,13 @@ const commands = {
       failCli('workflow_validate_failed', { details: { errors: v.errors, warnings: v.warnings } });
     }
 
-    if (f['dry-run']) { out({ ok: true, dryRun: true, nodes: nodes.length, edges: edges.length, warnings: v.warnings }); return; }
+    if (f['dry-run']) {
+      out(withNotice(
+        { ok: true, dryRun: true, nodes: nodes.length, edges: edges.length, warnings: v.warnings },
+        Notice.dryRunOnly()
+      ));
+      return;
+    }
 
     await client.post(`/api/core/app/version/publish?appId=${appId}`, {
       nodes, edges, chatConfig,
@@ -1016,7 +1022,7 @@ const commands = {
       nodes: d.nodes, edges: d.edges, chatConfig: d.chatConfig,
       isPublish: true, autoSave: false, versionName: f.name || 'publish'
     });
-    out({ ok: true, appId });
+    out(withNotice({ ok: true, appId }, Notice.appCreated(appId)));
   },
 
   // ===== 知识库 =====
@@ -1058,7 +1064,10 @@ const commands = {
       }) },
       file: { name: f.name || path.basename(filePath), buffer: fs.readFileSync(filePath) }
     });
-    out({ ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen });
+    out(withNotice(
+      { ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen },
+      Notice.trainingAsync(d.collectionId)
+    ));
   },
 
   /** 纯文本创建文档 */
@@ -1074,7 +1083,10 @@ const commands = {
       customPdfParse: true, autoIndexes: true, imageIndex: true,
       dataEnhanceCollectionName: true, indexPrefixTitle: true
     });
-    out({ ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen });
+    out(withNotice(
+      { ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen },
+      Notice.trainingAsync(d.collectionId)
+    ));
   },
 
   /** 网页链接创建文档 */
@@ -1092,7 +1104,10 @@ const commands = {
       customPdfParse: true, autoIndexes: true, imageIndex: true,
       dataEnhanceCollectionName: true, indexPrefixTitle: true
     });
-    out({ ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen });
+    out(withNotice(
+      { ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen },
+      Notice.trainingAsync(d.collectionId)
+    ));
   },
 
   /** 文档列表 */
@@ -1283,15 +1298,16 @@ const commands = {
       similarity: Number(f.similarity) || 0.2,
       searchMode: f.mode || 'embedding'
     });
-    out({
-      ok: true, duration: d.duration, total: (d.list || []).length,
+    const total = (d.list || []).length;
+    out(withNotice({
+      ok: true, duration: d.duration, total,
       list: (d.list || []).map(x => ({
         // score 是数组 [{type,value,index}]，取最高分
-        score: Math.max(...(Array.isArray(x.score) ? x.score.map(s => s.value ?? s) : [x.score ?? 0])),
+        score: Math.max(...(Array.isArray(x.score) ? x.score.map(v => v.value ?? v) : [x.score ?? 0])),
         source: x.sourceName, chunkIndex: x.chunkIndex,
         text: (x.q || '').slice(0, 120)
       }))
-    });
+    }, total === 0 ? Notice.emptySearch(datasetId) : null));
   },
 
   /** 删除文档 */
@@ -1391,7 +1407,10 @@ const commands = {
         }
       } catch {}
     }
-    out({ ok: true, trace, answer });
+    out(withNotice(
+      { ok: true, trace, answer },
+      !answer ? Notice.emptyAnswer(appId) : null
+    ));
   },
 
   async 'apikey create'(args, f) {

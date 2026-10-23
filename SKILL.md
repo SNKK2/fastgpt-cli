@@ -206,6 +206,20 @@ fastgpt info --json     # 结构化，给 agent 解析
 
 `readOnly: true` 说明账号只能看不能改 —— 此时不应尝试任何写操作。
 
+## 成功响应也带提示（_notice）
+
+操作成功不代表可以往下走。CLI 会在成功响应里附加 `_notice`：
+
+| 命令 | notice.type | 提示内容 |
+|---|---|---|
+| `wf build --dry-run` | `dry_run_only` | 只校验了结构，还必须真实部署 + chat run |
+| `app create` | `app_created` | 应用节点为空，此时无法对话，下一步写 DSL |
+| `ds add-file/text/link` | `training_async` | 训练异步执行，此时检索返回空，轮询 `ds training` |
+| `ds search` 空结果 | `empty_result` | 可能训练未完成，不一定是配置错误 |
+| `chat run` 空回答 | `empty_answer` | 应用未发布或节点未配模型 |
+
+**看到 `_notice` 就按 `hint` 走下一步，不要忽略。**
+
 ## 内在参数自动调整
 
 DSL 里有几类参数**不写就会出错**，`wf build` 会按节点依赖关系自动修正：
