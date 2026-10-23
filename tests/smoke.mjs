@@ -2,7 +2,7 @@
 // 运行: node tests/smoke.mjs
 import { node, VARP, REF } from '../lib/nodes.mjs';
 import { validateWorkflow, edge, chain } from '../lib/validate.mjs';
-import { cliError, BASE_PRESETS, Notice, withNotice, exitCodeFor } from '../lib/errors.mjs';
+import { cliError, BASE_PRESETS, WEBSITE_TO_PRESET, Notice, withNotice, exitCodeFor } from '../lib/errors.mjs';
 import { blockEnvelope } from '../lib/blocker.mjs';
 
 let pass = 0, fail = 0;
@@ -301,6 +301,31 @@ section('base 地址纠错');
   ok('base_looks_like_website 给出 cloud.fastgpt.cn', /cloud\.fastgpt\.cn/.test(env.hint || ''));
   ok('base_looks_like_website 建议用 preset', /--preset cn/.test(env.next_command || ''));
   ok('base_looks_like_website 的 next 是 init', /fastgpt init/.test(env.next_command || ''));
+}
+
+// ---------- 10. 域名映射表 ----------
+section('域名映射表');
+
+{
+  ok('fastgpt.cn → cn', WEBSITE_TO_PRESET['fastgpt.cn'] === 'cn');
+  ok('www.fastgpt.cn → cn', WEBSITE_TO_PRESET['www.fastgpt.cn'] === 'cn');
+  ok('doc.fastgpt.cn → cn', WEBSITE_TO_PRESET['doc.fastgpt.cn'] === 'cn');
+  ok('fastgpt.io → global', WEBSITE_TO_PRESET['fastgpt.io'] === 'global');
+  ok('fastgpt.run → global', WEBSITE_TO_PRESET['fastgpt.run'] === 'global');
+  ok('cloud.fastgpt.cn 不在映射表（它是正确的）', !WEBSITE_TO_PRESET['cloud.fastgpt.cn']);
+
+  const e = cliError('base_looks_like_website');
+  ok('hint 列出 doc.fastgpt.cn', /doc\.fastgpt\.cn/.test(e.hint || ''));
+  ok('hint 列出 fastgpt.run', /fastgpt\.run/.test(e.hint || ''));
+  ok('hint 给出四个预设', ['cn', 'global', 'local', 'private'].every(p => e.hint.includes(p)));
+  ok('hint 给出判断标准', /getInitData.*code.*200/.test(e.hint || ''));
+}
+
+// cliError 不应被 undefined 覆盖
+{
+  const e = cliError('base_looks_like_website', { hint: undefined, message: '自定义' });
+  ok('undefined hint 不覆盖默认值', /fastgpt\.cn/.test(e.hint || ''));
+  ok('自定义 message 生效', e.message === '自定义');
 }
 
 // ---------- 输出 ----------

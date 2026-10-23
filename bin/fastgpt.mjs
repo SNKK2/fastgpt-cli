@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
-import { cliError, exitCodeFor, isCliError, BASE_PRESETS, Notice, withNotice } from '../lib/errors.mjs';
+import { cliError, exitCodeFor, isCliError, BASE_PRESETS, WEBSITE_TO_PRESET, Notice, withNotice } from '../lib/errors.mjs';
 import { setBlock, getBlock, clearBlock, blockEnvelope } from '../lib/blocker.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
@@ -349,17 +349,36 @@ const commands = {
       // 校验 base 是否真的是 FastGPT 服务端（不是官网/文档站）
       if (base) {
         const norm = String(base).replace(/\/+$/, '');
-        const knownWebsite = /^https?:\/\/(www\.)?fastgpt\.(cn|io)$/i.test(norm);
-        const probeUrl = `${norm}/api/support/user/account/preLogin?username=probe`;
+        const host = (() => { try { return new URL(norm).host.toLowerCase(); } catch { return ''; } })();
+        const suggestPreset = WEBSITE_TO_PRESET[host];
+        const probeUrl = `${norm}/api/common/system/getInitData`;
         let alive = false;
+        let status = 0;
         try {
-          const r = await fetch(probeUrl, { signal: AbortSignal.timeout(5000) });
-          alive = r.ok || r.status === 400 || r.status === 401;
+          const r = await fetch(probeUrl, { signal: AbortSignal.timeout(6000) });
+          status = r.status;
+          if (r.ok) {
+            const t = await r.text();
+            try { alive = JSON.parse(t)?.code === 200; } catch {}
+          }
         } catch {}
 
         if (!alive) {
-          const e = cliError(knownWebsite ? 'base_looks_like_website' : 'base_unreachable', {
-            details: { base: norm, probed: probeUrl }
+          const e = cliError(suggestPreset ? 'base_looks_like_website' : 'base_unreachable', {
+            message: suggestPreset
+              ? `${norm} 是 FastGPT 官网/文档站，不是服务端`
+              : undefined,
+            hint: suggestPreset
+              ? undefined
+              : `${norm} 上没有 FastGPT API（探测 ${probeUrl} 返回 ${status || '无响应'}）。\n` +
+                '\n' +
+                '可能的正确地址：\n' +
+                '  · 国内 SaaS   https://cloud.fastgpt.cn   (--preset cn)\n' +
+                '  · 海外 SaaS   https://cloud.fastgpt.io   (--preset global)\n' +
+                '  · 本地部署    http://localhost:3000      (--preset local)\n' +
+                '  · 私有化      https://your-host           (--preset private --base <地址>)',
+            nextCommand: suggestPreset ? `fastgpt init --preset ${suggestPreset}` : 'fastgpt init --preset cn',
+            details: { base: norm, probed: probeUrl, status, suggestedPreset: suggestPreset || null }
           });
           console.error('');
           console.error('❌ ' + e.message);
@@ -696,15 +715,16 @@ const commands = {
     if (base) {
       const t0 = Date.now();
       const norm = String(base).replace(/\/+$/, '');
-      const isWebsite = /^https?:\/\/(www\.)?fastgpt\.(cn|io)$/i.test(norm);
+      const host = (() => { try { return new URL(norm).host.toLowerCase(); } catch { return ''; } })();
+      const isWebsite = !!WEBSITE_TO_PRESET[host];
       try {
         const r = await fetch(norm + '/api/common/system/getInitData', { signal: AbortSignal.timeout(8000) });
         const ms = Date.now() - t0;
         if (!r.ok) {
           add('服务可达', false, `HTTP ${r.status}（${base} 不是 FastGPT 服务端）`,
             isWebsite
-              ? 'fastgpt.cn / fastgpt.io 是官网。用 fastgpt init --preset cn（cloud.fastgpt.cn）或 --preset global（cloud.fastgpt.io）'
-              : '确认地址是否带 /api 前缀错误，或服务是否启动');
+              ? `${host} 是官网/文档站。用 fastgpt init --preset ${WEBSITE_TO_PRESET[host]}（${BASE_PRESETS[WEBSITE_TO_PRESET[host]].base}）`
+              : `确认地址是否正确，或服务是否启动。SaaS 用 --preset cn / global，自建用 --preset local`);
         } else {
           const text = await r.text();
           let parsed = null;
