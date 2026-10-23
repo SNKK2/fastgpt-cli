@@ -213,8 +213,8 @@ section('成功提示 _notice');
 
 {
   const p = withNotice({ ok: true, a: 1 }, Notice.dryRunOnly());
-  ok('dry-run notice 挂载成功', p._notice?.type === 'dry_run_only');
-  ok('dry-run notice 说明不是真部署', /只校验了结构/.test(p._notice?.message || ''));
+  ok('dry-run notice 挂载成功', p._notice?.type === 'dry_run_verified');
+  ok('dry-run notice 说明已验证未写库', /尚未写入/.test(p._notice?.message || ''));
 }
 
 {
