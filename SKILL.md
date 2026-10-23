@@ -77,9 +77,25 @@ git clone https://github.com/SNKK2/fastgpt-cli.git
 cd fastgpt-cli
 chmod +x bin/fastgpt.mjs
 
-node bin/fastgpt.mjs init      # 配置地址 + 登录
-node bin/fastgpt.mjs doctor    # 环境自检：现在能不能干活
+node bin/fastgpt.mjs init      # 交互选择部署版本 + 登录
+node bin/fastgpt.mjs doctor    # 环境自检
 ```
+
+`init` 会列出四种部署版本，选一个即可：
+
+| preset | 部署版本 | 地址 |
+|---|---|---|
+| `cn` | 中国 SaaS 版 | `https://cloud.fastgpt.cn` |
+| `global` | 海外 SaaS 版 | `https://cloud.fastgpt.io` |
+| `local` | 本地开发 | `http://localhost:3000` |
+| `private` | 商业私有化 | 需你提供，如 `http://192.168.1.10:3000` |
+
+```bash
+fastgpt init --preset cn --user <账号> --pass <密码>
+fastgpt init --preset private --base https://fastgpt.yourcompany.com
+```
+
+**这些选项也直接出现在未配置的错误返回里**，不需要查文档。
 
 `init` 会引导你完成两件事，写入 `~/.fastgpt/config.json`（权限 600）：
 

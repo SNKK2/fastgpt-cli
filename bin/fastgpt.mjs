@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
-import { cliError, exitCodeFor, isCliError } from '../lib/errors.mjs';
+import { cliError, exitCodeFor, isCliError, BASE_PRESETS } from '../lib/errors.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
@@ -315,13 +315,59 @@ const commands = {
     };
 
     try {
-      // 1. 服务地址
-      let base = f.base || process.env.FASTGPT_BASE || getBase();
+      // 1. 服务地址：--preset > --base > 环境变量 > 已有配置 > 交互选择
+      let base = null;
+
+      const presetKey = f.preset ? String(f.preset).toLowerCase() : null;
+      if (presetKey) {
+        const p = BASE_PRESETS[presetKey];
+        if (!p) {
+          failCli('base_unknown_preset', {
+            options: Object.entries(BASE_PRESETS).map(([k, v]) => ({ preset: k, label: v.label, base: v.base }))
+          });
+        }
+        if (p.base) {
+          base = p.base;
+          console.error(`✓ 使用预设：${p.label} → ${base}`);
+        } else {
+          // private 等需要手动输入
+          if (f.base) base = String(f.base);
+          else if (rl) {
+            console.error(`\n${p.label} ${p.hint}`);
+            base = await ask('部署地址: ');
+          } else {
+            failCli('not_configured', {
+              message: '商业私有化版本需要显式提供地址',
+              hint: '运行 fastgpt init --preset private --base <你的地址> --user <账号> --pass <密码>',
+              nextCommand: 'fastgpt init --preset private --base https://your-fastgpt-host',
+              options: Object.entries(BASE_PRESETS).map(([k, v]) => ({ preset: k, label: v.label, base: v.base, ...(v.hint ? { hint: v.hint } : {}) }))
+            });
+          }
+        }
+      }
+
+      if (!base) base = f.base || process.env.FASTGPT_BASE || getBase();
+
       if (!base) {
         if (!rl) {
-          fail('需要 --base 参数（或设置 FASTGPT_BASE）\n  fastgpt init --base https://your-fastgpt-host --user <账号> --pass <密码>');
+          failCli('not_configured', {
+            options: Object.entries(BASE_PRESETS).map(([k, v]) => ({
+              preset: k, label: v.label, base: v.base, ...(v.hint ? { hint: v.hint } : {})
+            }))
+          });
         }
-        base = await ask('FastGPT 服务地址（如 https://your-host）: ');
+        // 交互选择部署版本
+        console.error('\n未配置 FastGPT 服务地址，请选择部署版本：');
+        const keys = Object.keys(BASE_PRESETS);
+        keys.forEach((k, i) => {
+          const p = BASE_PRESETS[k];
+          console.error(`  ${i + 1}) ${p.label.padEnd(14)}${p.base || '（需手动输入地址）'}`);
+        });
+        console.error('');
+        const pick = (await ask(`选择 [1-${keys.length}，默认 1]: `, '1')).trim();
+        const idx = parseInt(pick, 10) || 1;
+        const chosen = BASE_PRESETS[keys[idx - 1]] || BASE_PRESETS.cn;
+        base = chosen.base || await ask('部署地址: ');
       }
       if (!base) fail('服务地址不能为空');
       if (!/^https?:\/\//.test(base)) base = 'https://' + base;
@@ -620,7 +666,8 @@ const commands = {
 
     // 1. 配置
     const base = getBase();
-    add('服务地址', !!base, base || '未配置', base ? null : 'fastgpt init');
+    add('服务地址', !!base, base || '未配置',
+      base ? null : 'fastgpt init --preset cn|global|local，或 --preset private --base <地址>');
 
     // 2. 可达性
     if (base) {
@@ -681,6 +728,7 @@ const commands = {
         : '还不能建工作流，先解决下面标 ✗ 的项',
       checks,
       ...(blockers.length ? { next: blockers[0].fix } : {}),
+      ...(!base ? { presets: Object.entries(BASE_PRESETS).map(([k, v]) => ({ preset: k, label: v.label, base: v.base })) } : {}),
       version: JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
     });
   },
@@ -1400,7 +1448,13 @@ const isOffline = offlineCmds.has(key) || (key === 'wf build' && flags['dry-run'
 
 async function run(handler, handlerArgs, handlerFlags) {
   if (!authGroup && !isOffline) {
-    if (!isConfigured()) failCli('not_configured');
+    if (!isConfigured()) {
+      failCli('not_configured', {
+        options: Object.entries(BASE_PRESETS).map(([key, v]) => ({
+          preset: key, label: v.label, base: v.base, ...(v.hint ? { hint: v.hint } : {})
+        }))
+      });
+    }
     await ensureAuth();
   }
   return handler(handlerArgs, handlerFlags);
