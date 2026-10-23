@@ -34,15 +34,32 @@ description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI �
 
 真实部署时 CLI 会拿 DSL 里的 modelId 和团队真实候选比对，对不上直接 exit 3。
 
-### 🚨 红线三：dry-run 通过 ≠ 能用
+### 🚨 红线三：dry-run 也要登录
 
 ```
-wf build --dry-run  =  只校验结构（离线，0.03 秒）
-wf build            =  真实写库（需要登录、会校验 modelId）
-chat run            =  验证真的能跑
+wf lint  <dsl.json>       纯语法检查（离线，可未登录）—— 不代表可部署
+wf build <dsl.json> --dry-run   需要登录，校验结构 + 验证 modelId/datasetId 真实性
+wf build <dsl.json>             真实写库
+chat run                        验证真的能跑
 ```
 
-**`--dry-run` 通过不代表工作流可用。** 交付前必须真实部署 + `chat run` 验证。
+**`wf build --dry-run` 强制要求登录。** 未登录会 exit 11 并让你去 init。
+
+理由：dry-run 要验证 `modelId` 是否属于当前团队、`datasetId` 是否存在。
+不登录这些验证都做不了，「结构合法」的假象会让人误以为能部署。
+
+**只有 `wf lint` 是真正离线的**，它的输出会明确标注：
+
+```json
+{
+  "ok": true,
+  "lintOnly": true,
+  "note": "仅语法检查，未验证 modelId / datasetId 真实性，不代表可部署",
+  "unresolvedModelIds": [{ "node": "n_chat", "value": "<YOUR_MODEL_ID>" }]
+}
+```
+
+**看到 `lintOnly: true` 就说明：还不能交付，必须登录后跑 `wf build`。**
 
 **唯一合法的建工作流方式**：
 

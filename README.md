@@ -75,6 +75,19 @@ $ fastgpt doctor
 
 一次看清能不能干活，不用跑到第三步才发现缺东西。
 
+## dry-run 与 lint 的区别
+
+```bash
+fastgpt wf lint  x.json            # 离线纯语法，可未登录
+fastgpt wf build x.json --dry-run  # 需登录，验证 modelId/datasetId 真实性
+fastgpt wf build x.json            # 真实写库
+```
+
+`lint` 的输出带 `lintOnly: true` 和 `unresolvedModelIds`，明确告诉你哪些 ID 还没填。
+**它不代表可部署。**
+
+`--dry-run` 未登录会 exit 11，强制先 `init` —— 避免用占位符交付半成品。
+
 ## 内在参数自动调整
 
 几类参数不写就会出错，`wf build` 按节点依赖自动修正：
@@ -129,7 +142,7 @@ $ fastgpt doctor
 { "type": "chat", "id": "n_chat", "modelId": "<OBJECT_ID>", "question": "n_start:userChatInput" }
 
 # 部署：结构、handle、selectedType 全部自动生成
-node bin/fastgpt.mjs wf build my-workflow.json --dry-run   # 先校验
+node bin/fastgpt.mjs wf build my-workflow.json --dry-run   # 需要登录，验证真实 ID
 node bin/fastgpt.mjs wf build my-workflow.json             # 再写入
 ```
 

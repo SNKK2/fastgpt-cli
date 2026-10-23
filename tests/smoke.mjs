@@ -229,6 +229,25 @@ section('成功提示 _notice');
 
 ok('pluginPublished notice 提示 VARP', /实际nodeId/.test(Notice.pluginPublished('x').hint || ''));
 
+// ---------- 6. dry-run vs lint 语义 ----------
+section('dry-run / lint 语义');
+
+// dry-run 的 notice 必须说明「已验证但未写入」
+{
+  const n = Notice.dryRunOnly();
+  ok('dry-run notice 标注已验证', n.type === 'dry_run_verified');
+  ok('dry-run notice 说尚未写入', /尚未写入/.test(n.message || ''));
+  ok('dry-run notice 有 forbidden', /不要把 dry-run 通过当作已完成交付/.test(n.forbidden || ''));
+}
+
+// not_logged_in 必须要求结束本轮并问用户
+{
+  const e = cliError('not_logged_in');
+  ok('not_logged_in 要求问用户', e.actionRequired === 'user');
+  ok('not_logged_in 提示结束本轮', /结束本轮/.test(e.hint || ''));
+  ok('not_logged_in 禁止占位符交付', /不要跳过登录直接写 DSL 或用占位符交付/.test(e.forbidden || ''));
+}
+
 // ---------- 输出 ----------
 console.log(results.join('\n'));
 console.log(`\n${'─'.repeat(50)}`);

@@ -958,18 +958,12 @@ const commands = {
       console.error('');
     }
 
-    // 预检：dry-run 纯静态（不触网），真实部署才做网络校验
+    // 预检：dry-run 和真实部署走同一套校验（都要验证 modelId 真实性）
     if (!f['no-model-hook']) {
-      if (f['dry-run']) {
-        if (!staticModelIdCheck(nodes)) {
-          failCli('model_id_forged', { message: 'modelId 是全零假值，部署后必然失败' });
-        }
-      } else {
-        nodes = await ensureModelIdHook(nodes, {
-          autoFill: !f['no-auto-model'],
-          allowModelName: !!f['allow-model-name']
-        });
-      }
+      nodes = await ensureModelIdHook(nodes, {
+        autoFill: !f['no-auto-model'],
+        allowModelName: !!f['allow-model-name']
+      });
     }
 
     const v = validateWorkflow({ nodes, edges, chatConfig });
@@ -978,8 +972,38 @@ const commands = {
     }
 
     if (f['dry-run']) {
+      // 验证 datasetId 真实性
+      const dsIds = new Set();
+      for (const n of nodes) {
+        for (const inp of n.inputs || []) {
+          if (inp.key !== 'datasets' || !Array.isArray(inp.value)) continue;
+          for (const d of inp.value) {
+            if (d && typeof d === 'object' && d.datasetId) dsIds.add(d.datasetId);
+          }
+        }
+      }
+      const badDs = [];
+      if (dsIds.size) {
+        let realDs = [];
+        try {
+          const d = await client.post('/api/core/dataset/list', { parentId: null, searchKey: '' });
+          realDs = (d || []).map(x => x._id);
+        } catch {}
+        for (const id of dsIds) {
+          if (!realDs.includes(id)) badDs.push(id);
+        }
+      }
+      if (badDs.length) {
+        failCli('dataset_not_found', {
+          message: `DSL 引用了当前团队不存在的知识库：${badDs.join(', ')}`,
+          hint: '运行 fastgpt ds list 查看可用知识库 ID',
+          details: { invalidDatasetIds: badDs }
+        });
+      }
+
       out(withNotice(
-        { ok: true, dryRun: true, nodes: nodes.length, edges: edges.length, warnings: v.warnings },
+        { ok: true, dryRun: true, nodes: nodes.length, edges: edges.length, warnings: v.warnings,
+          verified: { modelId: true, datasetIds: dsIds.size } },
         Notice.dryRunOnly()
       ));
       return;
@@ -991,6 +1015,43 @@ const commands = {
       versionName: dsl.versionName || 'v1'
     });
     out({ ok: true, appId, nodes: nodes.length, edges: edges.length, publish: !!dsl.publish, warnings: v.warnings });
+  },
+
+  /** 纯语法检查：离线，不验证 ID 真实性，不代表可部署 */
+  async 'wf lint'(args, f) {
+    const file = f.file || args[0];
+    if (!file) fail('需要 JSON 文件路径');
+    const d = readJson(file);
+    let nodes, edges, chatConfig;
+    if ((d.nodes || []).some(n => n.type)) {
+      try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); }
+      catch (e) { fail(e.message); }
+    } else {
+      nodes = d.nodes || d; edges = d.edges || []; chatConfig = d.chatConfig || {};
+    }
+    const v = validateWorkflow({ nodes, edges, chatConfig });
+    const placeholder = [];
+    for (const n of nodes) {
+      for (const inp of n.inputs || []) {
+        if (inp.key === 'modelId' && typeof inp.value === 'string' && !/^[0-9a-f]{24}$/i.test(inp.value)) {
+          placeholder.push({ node: n.nodeId, value: inp.value });
+        }
+      }
+    }
+    out({
+      ok: v.ok,
+      lintOnly: true,
+      note: '仅语法检查，未验证 modelId / datasetId 真实性，不代表可部署',
+      nodes: nodes.length,
+      edges: edges.length,
+      errors: v.errors,
+      warnings: v.warnings,
+      ...(placeholder.length ? { unresolvedModelIds: placeholder } : {}),
+      next: v.ok
+        ? '语法没问题。真实部署用 fastgpt wf build <file>（需要登录）'
+        : '先修正 errors，再运行 fastgpt wf build'
+    });
+    if (!v.ok) process.exit(2);
   },
 
   async 'wf validate'(args, f) {
@@ -1436,7 +1497,13 @@ const commands = {
         auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--no-wait]（打开浏览器扫码）', 'scan --wait --session-id <id>（第二轮确认）', 'whoami', 'logout'],
         model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
-        wf: ['build <dsl.json> [--dry-run]', 'validate <json>', 'get <appId> [--out f]', 'publish <appId>'],
+        wf: [
+          'build <dsl.json> [--dry-run]   需要登录，dry-run 也验证真实 ID',
+          'lint <dsl.json>                纯语法检查（离线，不代表可部署）',
+          'validate <json>                同 lint',
+          'get <appId> [--out f]',
+          'publish <appId>'
+        ],
         ds: ['list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
         perm: ['dataset <id> [--set tmbId:6]', 'collection <id>', 'app <id>', 'member'],
         chat: ['run --appId -q "问题" [--detail]'],
@@ -1468,8 +1535,9 @@ if (!fn) { out({ ok: false, error: `未知命令: ${pos.slice(0, 3).join(' ')}` 
 const consumed = key.split(' ').length;
 // 离线命令：不触网，不需要鉴权
 const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' || pos[0] === 'doctor' || pos[0] === 'info' || !pos[0];
-const offlineCmds = new Set(['wf validate']);
-const isOffline = offlineCmds.has(key) || (key === 'wf build' && flags['dry-run']);
+// 只有 lint 是离线的（纯语法检查）。dry-run 必须登录，因为它要验证真实 ID。
+const offlineCmds = new Set(['wf lint', 'wf validate']);
+const isOffline = offlineCmds.has(key);
 
 async function run(handler, handlerArgs, handlerFlags) {
   if (!authGroup && !isOffline) {
