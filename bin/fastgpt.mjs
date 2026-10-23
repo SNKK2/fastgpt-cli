@@ -1499,13 +1499,111 @@ const commands = {
 
   async 'perm app'(args, f) {
     const id = f.id || args[0];
+    if (!id) fail('用法: perm app <appId> [--set tmbId:权限]');
+    if (f.set) {
+      const [tmbId, perm] = String(f.set).split(':');
+      if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（权限 1管理 2写 4读，相加）');
+      await client.put('/api/proApi/core/app/collaborator/update', {
+        appId: id, collaborators: [{ tmbId, permission: Number(perm) }]
+      });
+      out({ ok: true, appId: id, tmbId, permission: Number(perm) });
+      return;
+    }
+    if (f.del) {
+      await client.del(`/api/proApi/core/app/collaborator/delete?appId=${id}&tmbId=${f.del}`);
+      out({ ok: true, appId: id, removed: f.del });
+      return;
+    }
     const d = await client.get(`/api/proApi/core/app/collaborator/list?appId=${id}`);
-    out(d.clbs || []);
+    out((d.clbs || []).map(c => ({
+      tmbId: c.tmbId, name: c.name,
+      permission: c.permission?.permission,
+      read: c.permission?.hasReadPer, write: c.permission?.hasWritePer, manage: c.permission?.hasManagePer,
+      isOwner: c.permission?.isOwner
+    })));
   },
 
   async 'perm member'(args, f) {
-    const d = await client.post('/api/proApi/support/user/team/member/list', { teamId: null, searchKey: '' });
-    out((d.list || []).map(m => ({ tmbId: m.tmbId, userId: m.userId, name: m.memberName, role: m.role })));
+    // 写操作
+    if (f.del) {
+      await client.del(`/api/proApi/support/user/team/member/delete?tmbId=${f.del}`);
+      out({ ok: true, removed: f.del });
+      return;
+    }
+    if (f.restore) {
+      await client.post('/api/proApi/support/user/team/member/restore', { tmbId: f.restore });
+      out({ ok: true, restored: f.restore });
+      return;
+    }
+    if (f.rename) {
+      const [tmbId, ...rest] = String(f.rename).split(':');
+      await client.put('/api/proApi/support/user/team/member/updateNameByManager', {
+        tmbId, name: rest.join(':')
+      });
+      out({ ok: true, tmbId, name: rest.join(':') });
+      return;
+    }
+    if (f.count) {
+      const d = await client.get('/api/proApi/support/user/team/member/count');
+      out(d);
+      return;
+    }
+    const d = await client.post('/api/proApi/support/user/team/member/list', {
+      teamId: null, searchKey: f.search || '', pageNum: 1, pageSize: Number(f.limit) || 100
+    });
+    out({
+      total: d.total,
+      list: (d.list || []).map(m => ({
+        tmbId: m.tmbId, userId: m.userId, name: m.memberName, role: m.role, status: m.status
+      }))
+    });
+  },
+
+  /** 团队级协作者权限（整个团队能做什么，不是某个资源的） */
+  async 'perm team'(args, f) {
+    if (f.set) {
+      const [tmbId, perm] = String(f.set).split(':');
+      await client.put('/api/proApi/support/user/team/collaborator/updateOne', {
+        tmbId, permission: Number(perm)
+      });
+      out({ ok: true, tmbId, permission: Number(perm) });
+      return;
+    }
+    if (f.del) {
+      await client.del(`/api/proApi/support/user/team/collaborator/delete?tmbId=${f.del}`);
+      out({ ok: true, removed: f.del });
+      return;
+    }
+    const d = await client.get('/api/proApi/support/user/team/collaborator/list');
+    out((d.clbs || []).map(c => ({
+      tmbId: c.tmbId, name: c.name, permission: c.permission?.permission,
+      read: c.permission?.hasReadPer, write: c.permission?.hasWritePer, manage: c.permission?.hasManagePer,
+      isOwner: c.permission?.isOwner
+    })));
+  },
+
+  /** 邀请链接：团队成员只能通过邀请加入，没有直接 add 接口 */
+  async 'perm invite'(args, f) {
+    if (f.create) {
+      const d = await client.post('/api/proApi/support/user/team/invitationLink/create', {
+        description: f.desc || 'cli-created',
+        expires: f.expires || '7d',       // 30m | 7d | 1y
+        usedTimesLimit: Number(f.limit ?? -1)   // 1 = 一次, -1 = 无限
+      });
+      out({ ok: true, linkId: d, url: `${client.base}/account/invite?linkId=${d}` });
+      return;
+    }
+    if (f.forbid) {
+      await client.put('/api/proApi/support/user/team/invitationLink/forbid', { linkId: f.forbid });
+      out({ ok: true, forbidden: f.forbid });
+      return;
+    }
+    const list = await client.get('/api/proApi/support/user/team/invitationLink/list');
+    out((list || []).map(x => ({
+      linkId: x.linkId, description: x.description, expires: x.expires,
+      usedTimesLimit: x.usedTimesLimit, forbidden: x.forbidden,
+      used: (x.members || []).length, members: x.members
+    })));
   },
 
   // ===== 运行调试 =====
@@ -1582,7 +1680,20 @@ const commands = {
           'publish <appId>'
         ],
         ds: ['list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
-        perm: ['dataset <id> [--set tmbId:6]', 'collection <id>', 'app <id>', 'member'],
+        perm: [
+          'dataset <id> [--set tmbId:6]              查/设知识库协作者',
+          'collection <id> [--set tmbId:6]           查/设集合协作者',
+          'app <id> [--set tmbId:6] [--del tmbId]    查/设/删应用协作者',
+          'member [--count] [--search 词]            成员列表',
+          'member --del <tmbId>                      移除成员',
+          'member --restore <tmbId>                  恢复已移除成员',
+          'member --rename tmbId:新名字               改成员名',
+          'team [--set tmbId:4] [--del tmbId]        团队级权限',
+          'invite                                    列出邀请链接',
+          'invite --create [--desc 说明] [--expires 30m|7d|1y] [--limit 1|-1]',
+          'invite --forbid <linkId>                  禁用链接',
+          '权限值: 1管理 2写 4读，相加。读写=6 只读=4 全权=7'
+        ],
         chat: ['run --appId -q "问题" [--detail]'],
         apikey: ['create --name']
       },

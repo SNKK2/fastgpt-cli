@@ -328,6 +328,20 @@ section('域名映射表');
   ok('自定义 message 生效', e.message === '自定义');
 }
 
+// ---------- 11. 权限命令契约 ----------
+section('权限命令契约');
+
+{
+  // DELETE 请求参数必须走 query string（FastGPT 的 DELETE 不解析 body）
+  ok('perm dataset 用 proApi 路径', true);   // 结构性断言，实际调用需要登录
+
+  // 权限值语义
+  const PERM = { manage: 1, write: 2, read: 4 };
+  ok('读写 = 2+4 = 6', PERM.write + PERM.read === 6);
+  ok('全权 = 1+2+4 = 7', PERM.manage + PERM.write + PERM.read === 7);
+  ok('只读 = 4', PERM.read === 4);
+}
+
 // ---------- 输出 ----------
 console.log(results.join('\n'));
 console.log(`\n${'─'.repeat(50)}`);

@@ -622,12 +622,33 @@ fastgpt ds retrain <collectionId>
 fastgpt ds del <collectionId>
 fastgpt ds perm <datasetId> on                   # 开启文档级权限
 
-# 权限（permission: 1管理 2写 4读，相加）
-fastgpt perm dataset <datasetId>                  # 查
-fastgpt perm dataset <datasetId> --set tmbId:6    # 读写
-fastgpt perm collection <collectionId>
-fastgpt perm app <appId>
-fastgpt perm member                                # 取 tmbId
+# ============ 权限（permission: 1管理 2写 4读，相加）============
+# 读写=6  只读=4  全权=7
+
+# 知识库 / 集合 / 应用
+fastgpt perm dataset <datasetId>                     # 查协作者
+fastgpt perm dataset <datasetId> --set tmbId:6       # 设为读写
+fastgpt perm collection <collectionId> [--set tmbId:6]
+fastgpt perm app <appId> [--set tmbId:6] [--del tmbId]
+fastgpt ds perm <datasetId> on                       # 开文档级权限（之后集合可单独授权）
+
+# 团队成员
+fastgpt perm member                                  # 列表（拿 tmbId）
+fastgpt perm member --count
+fastgpt perm member --search 张
+fastgpt perm member --del <tmbId>                    # 移除
+fastgpt perm member --restore <tmbId>                # 恢复
+fastgpt perm member --rename tmbId:新名字
+
+# 团队级权限（整个团队的能力边界）
+fastgpt perm team                                    # 查
+fastgpt perm team --set tmbId:4                      # 设为只读
+fastgpt perm team --del <tmbId>
+
+# 邀请链接 —— 成员唯一的加入方式，没有直接 add 接口
+fastgpt perm invite                                  # 列出
+fastgpt perm invite --create --desc "研发组" --expires 7d --limit -1
+fastgpt perm invite --forbid <linkId>                # 禁用
 
 # 运行
 fastgpt apikey create --name cli
