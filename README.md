@@ -1,34 +1,201 @@
 # fastgpt-cli
 
-通过命令行管理 FastGPT 全部资源：工作流、知识库、权限、运行调试。零依赖，Node 18+。
-
-所有命令输出 JSON，错误以非零退出码返回，适合 agent 直接调用。
-
-## 环境快照
-
-登录后自动展示，也可随时运行：
+> 用命令行管理 FastGPT 的全部资源 —— 工作流、知识库、权限、发布渠道、运行调试。
+> 为 **AI agent 设计**：每次输出都是 JSON，每条报错都是下一步的操作手册。
 
 ```bash
-fastgpt info          # 人类可读
-fastgpt info --deep   # 含工作流/知识库明细
-fastgpt info --json   # 结构化
+npm install -g github:SNKK2/fastgpt-cli
+fastgpt init --preset cn
+```
+
+零依赖 · Node 18+ · 45 个命令 · 28 种语义化错误 · 99 项离线测试
+
+---
+
+## 为什么需要它
+
+FastGPT 的 OpenAPI **只能管理知识库**，工作流、应用配置、权限、发布渠道全都没有公开接口。
+想自动化只能逆向内部 API —— 而内部 API 有一堆静默陷阱：
+
+| 你写的 | 实际结果 |
+|---|---|
+| `POST /api/core/app/update` | 返回 200，但 nodes 被静默 strip |
+| `PUT /api/core/app/version/update` | 返回 200，但只改了 versionName |
+| `system_httpHeaders` | 字段被丢弃，HTTP 节点永远收不到头 |
+| 工具参数用 `input` 模式 | agent 传参永远是空字符串 |
+| `{{$pluginInput.xxx$}}` | 变量引用不生效，必须用实际 nodeId |
+
+**这个 CLI 把这些坑固化进了构造器和校验器** —— 你不可能写出会踩坑的 JSON。
+
+---
+
+## 30 秒上手
+
+```bash
+# 1. 配置 + 登录（预设：cn / global / local / private）
+fastgpt init --preset cn
+
+# 2. 环境自检 —— 告诉你现在能做什么，不能做什么
+fastgpt doctor
+
+# 3. 拿模型 ObjectId
+fastgpt model id
+
+# 4. 建应用
+fastgpt app create --name "智能客服" --type advanced
+# → {"appId":"<APP_ID>"}
+
+# 5. 写 DSL，部署
+cat > wf.json <<'EOF'
+{
+  "appId": "<APP_ID>",
+  "versionName": "v1",
+  "nodes": [
+    { "type": "start",  "id": "n_start" },
+    { "type": "chat",   "id": "n_chat",
+      "modelId": "<MODEL_OBJECT_ID>",
+      "prompt": "你是客服助手",
+      "question": "n_start:userChatInput" },
+    { "type": "answer", "id": "n_answer", "content": "n_chat:answerText" }
+  ],
+  "edges": [["n_start","n_chat"], ["n_chat","n_answer"]]
+}
+EOF
+
+fastgpt wf build wf.json --dry-run   # 先验证 modelId / datasetId 都是真的
+fastgpt wf build wf.json             # 部署并发布
+
+# 6. 建 key 试跑
+fastgpt apikey create --name cli
+fastgpt chat run --appId <APP_ID> -q "你好"
+```
+
+---
+
+## 三个核心设计
+
+### ① 错误就是操作手册
+
+agent 不会读文档。所以每条报错都自带：
+
+```json
+{
+  "ok": false,
+  "error": {
+    "type": "platform",
+    "subtype": "model_id_unavailable",
+    "message": "当前团队没有任何应用配置过模型，无法提取 modelId",
+    "action_required": "user",
+    "dead_end": true,
+    "must_end_turn": true,
+    "hint": "这不是 CLI 的校验策略，是 FastGPT 平台的硬限制。\n\n⚠️ 这条路没有替代走法：\n  · 修改 CLI 源码去掉校验 → 服务端仍会拒绝\n  · 直接调 API 传模型名 → 同样失败\n  · 编造 24 位 hex → 发布时一定报错\n\n唯一出路是让用户在 WebUI 配一次模型：\n  1. 打开任意应用 → 2. 拖入「AI 对话」节点 → 3. 选模型 → 4. 保存\n\n👉 把这条消息原样发给用户，然后结束本轮。",
+    "forbidden": "不要修改 CLI 源码、不要直接调 API 绕过、不要编造 ObjectId、不要换命令重试",
+    "resolved_by": "用户在 WebUI 配置模型后运行 fastgpt model id"
+  }
+}
+```
+
+四个字段各司其职：
+
+| 字段 | 作用 |
+|---|---|
+| `action_required` | `self` = 自己能解决，`user` = 必须问人，`none` = 无能为力 |
+| `dead_end` | `true` = 这条路走不通，不是可重试的失败 |
+| `must_end_turn` | `true` = 立即结束本轮，别试别的 |
+| `forbidden` | 明确列出所有"看起来能绕过但实际没用"的做法 |
+
+### ② DSL 而不是手写 JSON
+
+手写 `nodes` / `edges` 一定会错 —— handle 格式要 `nodeId-source-right`，
+`selectedType` 要跟 `value` 的类型匹配，`inputs` 是数组不是对象。
+
+DSL 只写业务语义：
+
+```json
+{
+  "type": "chat",
+  "id": "n_chat",
+  "modelId": "<MODEL_OBJECT_ID>",
+  "question": "n_start:userChatInput",
+  "quoteQA": "n_search:quoteQA"
+}
+```
+
+`wf build` 自动补全 30+ 个 UI 字段、算好 handle、推断 `selectedType`、生成 `position`。
+
+DSL 未覆盖的节点类型用 `raw` 兜底，仍然走全部校验 —— 不会因为"DSL 不支持"就绕开 CLI。
+
+### ③ 强制停止层
+
+撞上死路后，CLI 写本地阻断状态，**后续所有相关命令直接返回同一提示**：
+
+```bash
+$ fastgpt wf build wf.json --dry-run
+{"error": {"subtype": "model_id_unavailable", "dead_end": true}}
+→ 写入 ~/.fastgpt/blocked.json
+
+$ fastgpt wf build wf.json --dry-run      # 换参数
+$ fastgpt app create --name test          # 换命令
+{"blocked": true, "error": {"note": "当前环境已进入阻断状态，换命令或改参数都不会有不同结果"}}
+```
+
+不给 agent 留"再试一次"的空间。用户完成配置后 `fastgpt model id` 成功即自动解除。
+
+---
+
+## 命令一览
+
+<details>
+<summary><b>45 个命令，覆盖全生命周期</b></summary>
+
+| 组 | 命令 | 说明 |
+|---|---|---|
+| `init` | 1 | 配置服务地址 + 登录 |
+| `doctor` | 1 | 环境自检（地址/登录/模型/权限） |
+| `info` | 3 | 环境快照，含语义化 `can` 能力字段 |
+| `auth` | 5 | 密码登录、扫码登录（split-flow）、状态、登出 |
+| `model` | 2 | 提取真实 modelId、列出模型 |
+| `app` | 6 | 创建、列表、详情、更新、删除、复制 |
+| `wf` | 5 | `build` / `lint` / `get` / `validate` / `publish` |
+| `ds` | 16 | 知识库、集合、文档、QA、训练、检索、权限 |
+| `perm` | 4 | 成员、权限、协作者 |
+| `chat` | 1 | 运行对话（SSE 流式，支持 `--detail` 看节点轨迹） |
+| `apikey` | 1 | 创建 API Key |
+
+</details>
+
+### `wf lint` 与 `wf build --dry-run` 的区别
+
+```
+wf lint              纯离线语法检查。不需要登录，不验证 ID 真实性。
+                     输出 lintOnly: true —— 明确告诉你这只代表"语法对"
+
+wf build --dry-run   必须登录。验证 modelId 存在于当前团队、datasetId 真的存在。
+                     输出 dry_run_verified + 下一步提示
+```
+
+**故意不提供"完全离线也能 build"的路径** —— 那只会让 agent 用占位符产出"看起来成功"的假象。
+
+---
+
+## `doctor` / `info` 会告诉你现在能做什么
+
+```bash
+$ fastgpt info
 ```
 
 ```
   FastGPT 环境
   ──────────────────────────────────────────────
-  用户      wechat-o5Ljw6
-  团队      fastgpt 团队
+  用户      user_xxxxx
+  团队      你的团队
   身份      可写成员
-  套餐      standard（到期 2028-06-19）
   积分      剩余 925,978 / 共 2,169,999
 
   资源
   ──────────────────────────────────────────────
   工作流    23 个（其中高级编排 18）
   知识库    5 个（另有 4 个文件夹）
-  应用总数  49 个（含插件 12、工具集 9）
-  成员      55 人
   模型      31 个 LLM，7 个向量模型
 
   能力
@@ -38,324 +205,72 @@ fastgpt info --json   # 结构化
   ✗ 管理成员与权限
 ```
 
-### `can` —— 语义化能力
+`can` 字段是语义化的 —— agent 不用自己推断权限，直接看布尔值。
 
-`--json` 里除了原始 `permissions`（17 个 `hasXxxPer` 字段），还有派生出的 `can`：
-
-```json
-"can": {
-  "read": true, "write": true,
-  "createApp": true, "createDataset": true, "createApiKey": true,
-  "manageModels": false, "manageMembers": false,
-  "isOwner": false, "readOnly": false
-}
-```
-
-agent 直接读 `can.createDataset` 即可，不用记 `hasDatasetCreatePer`。
-
-## 环境自检
-
-```bash
-$ fastgpt doctor
-{
-  "ok": false,
-  "ready": false,
-  "summary": "还不能建工作流，先解决下面标 ✗ 的项",
-  "checks": [
-    { "check": "服务地址", "ok": true,  "detail": "https://your-host" },
-    { "check": "服务可达", "ok": true,  "detail": "80ms" },
-    { "check": "登录状态", "ok": true,  "detail": "138xxxx / team" },
-    { "check": "可用模型", "ok": false, "detail": "没有任何应用配置过模型",
-      "fix": "在 WebUI 任意应用中拖入「AI 对话」节点并选模型后保存，再运行 fastgpt model id" },
-    { "check": "知识库",   "ok": true,  "detail": "1 个" }
-  ],
-  "next": "在 WebUI 任意应用中拖入「AI 对话」节点并选模型后保存，再运行 fastgpt model id"
-}
-```
-
-一次看清能不能干活，不用跑到第三步才发现缺东西。
-
-## dry-run 与 lint 的区别
-
-```bash
-fastgpt wf lint  x.json            # 离线纯语法，可未登录
-fastgpt wf build x.json --dry-run  # 需登录，验证 modelId/datasetId 真实性
-fastgpt wf build x.json            # 真实写库
-```
-
-`lint` 的输出带 `lintOnly: true` 和 `unresolvedModelIds`，明确告诉你哪些 ID 还没填。
-**它不代表可部署。**
-
-`--dry-run` 未登录会 exit 11，强制先 `init` —— 避免用占位符交付半成品。
-
-## 内在参数自动调整
-
-几类参数不写就会出错，`wf build` 按节点依赖自动修正：
-
-```
-⚙️  已自动调整节点参数：
-   n_chat.isResponseAnswerText: (未设置) → false
-     answerText 已被 answerNode 消费，关闭节点自身输出以避免重复回复
-```
-
-不调整的后果：`chatNode` 流式输出一次 + `answerNode` 再输出一次 = **同一条回复显示两遍**。
-
-同时校验器会检测「多个 answerNode 引用同一输出」：
-
-- 同一路径上 → ERROR（会同时执行，重复输出）
-- 分属互斥分支 → WARNING（可忽略）
+---
 
 ## 成功响应也带提示
 
-操作成功 ≠ 可以往下走。关键命令会在 `_notice` 里给下一步：
+操作成功 ≠ 可以往下走：
 
 ```json
-{ "ok": true, "dryRun": true, "nodes": 5, "edges": 4,
+{
+  "ok": true,
+  "appId": "<APP_ID>",
   "_notice": {
-    "type": "dry_run_only",
-    "message": "dry-run 只校验了结构，没有写库、没有验证 modelId 真实性",
-    "hint": "下一步：去掉 --dry-run 真实部署，然后 fastgpt chat run 验证能跑通"
-  } }
+    "type": "app_created",
+    "message": "应用已创建，但节点为空，此时无法对话",
+    "hint": "下一步：写 DSL 后运行 fastgpt wf build <file>",
+    "nextCommand": "fastgpt wf get <APP_ID>"
+  }
+}
 ```
 
-覆盖 5 个容易踩坑的成功场景：dry-run 完成后、应用刚创建、
-文档刚上传（训练异步）、检索空结果、对话空回答。
+9 种场景：`dry_run_verified` / `training_async` / `empty_result` / `empty_answer` /
+`app_created` / `plugin_published` / `not_published` / `collection_permission_disabled` / `low_quota`
 
-## 强制停止层
+---
 
-有些问题是死路（比如团队没配过模型），CLI 会在本地写阻断状态：
+## 踩过的坑，都固化在代码里
 
-```json
-第一次：
-{ "error": { "subtype": "model_id_unavailable",
-             "dead_end": true, "must_end_turn": true,
-             "resolved_by": "用户在 WebUI 配置模型后运行 fastgpt model id" } }
-
-后续（换参数/换命令）：
-{ "blocked": true,
-  "error": { "dead_end": true,
-             "note": "当前环境已进入阻断状态，换命令或改参数都不会有不同结果" } }
-```
-
-被阻断的命令：`wf build` / `wf publish` / `app create`。
-用户完成配置后 `fastgpt model id` 成功即自动解除。
-
-## 错误契约
-
-所有错误都是结构化 JSON，`hint` 就是下一步操作，`action_required` 决定谁来处理：
-
-```json
-{ "ok": false, "error": {
-    "type": "platform", "subtype": "model_id_unavailable",
-    "message": "...", "hint": "...", "next_command": "fastgpt model id",
-    "action_required": "user",
-    "forbidden": "不要编造 ObjectId" } }
-```
-
-## 一句话用法
-
-**工作流用 DSL 描述，不要手写 FastGPT 原始 JSON。**
-
-```bash
-# DSL：只写 type + id + 业务参数
-{ "type": "chat", "id": "n_chat", "modelId": "<OBJECT_ID>", "question": "n_start:userChatInput" }
-
-# 部署：结构、handle、selectedType 全部自动生成
-fastgpt wf build my-workflow.json --dry-run   # 需要登录，验证真实 ID
-fastgpt wf build my-workflow.json             # 再写入
-```
-
-手写 `nodeId` / `sourceHandle` / `flowNodeType` 会踩中下文所有坑。
-DSL 未覆盖的节点类型用 `"type": "raw"` 传完整 JSON，仍然走校验。
-
-## 为什么需要它
-
-FastGPT 的 API 有一批会静默失败的坑，直接手写 HTTP 几乎必踩：
-
-| 坑 | 后果 | CLI 怎么处理 |
+| 坑 | 现象 | 固化位置 |
 |---|---|---|
-| `app/update` / `version/update` 是假保存 | 返回 200 但数据被 strip，拉回是空 | 只用 `version/publish` |
-| handle 格式是 `${nodeId}-source-${key}` | 顺序写反 UI 不渲染连线 | `edge()` 自动生成 |
-| 引用输入必须 `selectedType: reference` | 否则变量显示空白 | `input()` 自动推断 |
-| `modelId` 是 24 位 ObjectId | 传模型名发布失败 | 校验器拦截并警告 |
-| 分类分支桩由 `agents` 动态生成 | 手动塞 outputs 反而干扰 | 构造器只保留 cqResult |
-| 所有请求要 CSRF 头 | 403 csrf_invalid | client 内置 |
+| `app/update` 假保存 | 200 但 nodes 被 strip | `wf build` 只走 `version/publish` |
+| HTTP 头字段名 | `system_httpHeaders` 被静默丢弃 | `node.http()` 用 `system_httpHeader` |
+| 工具参数模式 | `input` 模式 agent 传参永远空 | `node.pluginModule()` 强制 `agentGenerated` |
+| 工具挂载方式 | `agent` + `selectedTools` 发布报 `appUnExist` | 校验器强制 `pluginModule` + `selectedTools` 边 |
+| 变量引用格式 | `{{$pluginInput.xxx$}}` 不生效 | `VARP(nodeId, outputId)` 用实际 nodeId |
+| chat 节点参数 | 带 `maxToken: ''` 导致输出被截断到 1 字 | 构造器不生成这两个字段 |
+| handle 顺序 | `n_a-kb-source-right` UI 不渲染 | `edge()` 自动算 `nodeId-source-{key}` |
+| 多 answer 引用 | 同一输出被多处引用会重复回复 | 校验器报 error / warning |
 
-## 安装
-
-```bash
-npm install -g github:SNKK2/fastgpt-cli
-
-fastgpt init     # 配置地址 + 登录
-fastgpt doctor   # 环境自检
-```
-
-### 开发模式
-
-```bash
-git clone https://github.com/SNKK2/fastgpt-cli.git
-cd fastgpt-cli && npm link
-```
-
-## 安装（其他方式）
-
-```bash
-# 作为 skill
-cp -r fastgpt-cli ~/.agents/skills/
-
-# 或作为全局命令
-cd fastgpt-cli
-npm link          # 或 ln -s "$PWD/bin/fastgpt.mjs" /usr/local/bin/fastgpt
-```
-
-## 快速开始
-
-```bash
-# 1. 初始化：配置服务地址 + 登录（写 ~/.fastgpt/config.json）
-fastgpt init
-
-# 非交互环境
-fastgpt init --base https://your-host --user <账号> --pass <密码>
-
-# 2. 确认身份
-fastgpt auth whoami
-
-# 3. 找模型 ObjectId
-fastgpt model id        # 扫描团队应用，自动提取
-# 如果返回空，说明团队还没有应用配过模型 → 按提示去 WebUI 点一次模型下拉框
-
-
-
-# 4. 找知识库 ID
-fastgpt ds list
-
-# 5. 建应用
-fastgpt app create --name "客户问答" --type advanced
-# → {"appId":"..."}
-
-# 6. 写 DSL，先干跑
-#    examples/dsl-basic.json          意图识别 + 知识库问答双分支
-#    examples/dsl-contract-review.json 文件上传 → 解析 → 合同审查批注（中立第三方视角）
-fastgpt wf build my-workflow.json --dry-run
-
-# 7. 正式保存
-fastgpt wf build my-workflow.json
-
-# 8. 建 key 并试跑
-fastgpt apikey create --name cli
-fastgpt chat run --appId <id> -q "你们有什么产品？" --detail
-```
+---
 
 ## 测试
 
 ```bash
-npm test          # 离线回归：构造器 / 校验规则 / 错误契约 / _notice
-npm run test:all  # 加上 DSL 示例校验
+npm test          # 99 项离线断言，不需要网络和账号
 ```
 
-62 项断言，全部离线，不触网。
+覆盖：错误契约结构、强制停止层、DSL 构建、校验规则、handle 生成、域名纠错、`_notice` 语义。
 
-## 目录
+---
 
-```
-fastgpt-cli/
-├── bin/fastgpt.mjs        CLI 入口 + 命令分发
-├── lib/
-│   ├── client.mjs         HTTP / CSRF / 错误归一
-│   ├── auth.mjs           认证引导：密码 / 扫码(CDP)
-│   ├── nodes.mjs          节点构造器（9 种节点）
-│   └── validate.mjs       连线构造器 + 保存前硬校验
-├── examples/
-│   ├── dsl-basic.json             意图识别 + 知识库问答双分支
-│   └── dsl-contract-review.json   文件解析 → 合同审查 → 批注版输出
-├── tests/
-│   └── smoke.mjs                  62 项离线回归测试
-├── SKILL.md               agent 使用说明
-└── .fastgpt/              凭证（cookies.json / apikey），权限 600
-```
+## 文档
 
-## 三层防错
+- [`SKILL.md`](./SKILL.md) —— 面向 agent 的完整操作手册（节点构造器、DSL 语法、故障排查表）
+- [`examples/`](./examples) —— 两个可直接部署的 DSL 示例
 
-```
-构造器（填对）  →  校验器（拦住）  →  保存（写库）
-```
-
-**构造器**：`node.chat()` / `node.classify()` 等自动补齐 selectedType、renderTypeList、outputs。
-
-**校验器**：写库前检查 9 类问题，不通过直接退出码 2，绝不写入半成品。
-
-**保存**：只有 `version/publish` 一个入口，避免误用假接口。
-
-校验失败的输出示例：
-
-```json
-{
-  "ok": false,
-  "stage": "validate",
-  "errors": [
-    "edge[1] 分支 key \"NOT_EXIST\" 不在 agents 中，可用: kb",
-    "edge[2] source 不存在: n_missing",
-    "n_answer.text 引用了不存在的节点 n_chat"
-  ],
-  "warnings": [
-    "n_classify.modelId=\"Qwen-flash\" 不是 24 位 ObjectId，发布可能报 \"Model model is unavailable\""
-  ]
-}
-```
-
-## DSL 引用简写
-
-```json
-"question": "n_start:userChatInput"       → ["n_start","userChatInput"]
-"datasets": ["<datasetId>:知识库名"]   → 完整 dataset 对象
-```
-
-## 知识库内容
-
-```bash
-# 文档
-fastgpt ds add-file  <datasetId> ./doc.pdf
-fastgpt ds add-batch <datasetId> ./docs --ext pdf,md --concurrency 3
-fastgpt ds add-text  <datasetId> --name 标题 --text "内容"
-fastgpt ds add-link  <datasetId> https://example.com
-
-# QA 问答对
-fastgpt ds add-qa <datasetId> --file qa.json --name "FAQ"
-
-# 验证
-fastgpt ds training <collectionId>
-fastgpt ds search   <datasetId> "查询词"
-```
-
-训练是异步的。`ds training` 会告诉你卡在哪个队列：
-
-```json
-{ "pending": { "index": 1 }, "done": false, "hint": "还在训练，检索会返回空，请继续轮询" }
-```
-
-`index` 队列没清空时检索一定为空，这是最容易误判的地方。
-
-## 发布渠道
-
-```bash
-fastgpt app share create --appId <id> --name "对外分享" --type share
-# → <your-fastgpt-host>/chat/share?shareId=xxx   （匿名可访问）
-
-fastgpt app share create --appId <id> --name "嵌入" --type iframe
-# → <your-fastgpt-host>/chat/share?shareId=xxx&iframe=true
-
-fastgpt app share create --appId <id> --name "API" --type apikey --qpm 200
-
-fastgpt app share list --appId <id>
-fastgpt app share delete <_id>     # 注意是 _id 不是 shareId
-```
-
-## 已知限制
-
-- `perm collection` 在部分实例返回 `collectionPermissionDisabled`，需先 `ds perm <id> on` 开启
-- `/api/core/workflow/debug` 在部分环境长挂不返回，用 `chat run --detail` 替代
-- 批量上传、QA 模式训练尚未封装
+---
 
 ## 安全
 
-`.fastgpt/cookies.json` 等同账号权限，有效期 7 天。已加入 `.gitignore`，勿提交。
+- 凭证存在 `~/.fastgpt/`，`600` 权限
+- 不记录、不上传任何 token
+- 扫码登录走本地 CDP，不经过第三方
+
+---
+
+## License
+
+MIT
