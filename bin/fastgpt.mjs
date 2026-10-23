@@ -216,6 +216,59 @@ async function ensureModelIdHook(nodes, { autoFill = true, allowModelName = fals
   return nodes;
 }
 
+
+// ---------- 内在参数自动调整 ----------
+/**
+ * 根据节点依赖关系修正那些「不写就出错」的参数。
+ *
+ * 典型冲突：chatNode 的 isResponseAnswerText=true 会让它自己输出回答，
+ * 如果它后面又接了 answerNode 消费同一个 answerText，用户就会看到两条回复。
+ */
+function autoTuneNodeParams(nodes) {
+  // 收集所有被引用的 [nodeId, outputId]
+  const consumed = new Set();
+  for (const n of nodes) {
+    if (n.flowNodeType !== 'answerNode') continue;
+    for (const inp of n.inputs || []) {
+      if (Array.isArray(inp.value) && inp.value.length === 2 && typeof inp.value[0] === 'string') {
+        consumed.add(`${inp.value[0]}:${inp.value[1]}`);
+      }
+    }
+  }
+
+  const changes = [];
+
+  for (const n of nodes) {
+    // 1. chatNode：answerText 被 answerNode 消费时，关闭自动输出
+    if (n.flowNodeType === 'chatNode') {
+      const isConsumed = consumed.has(`${n.nodeId}:answerText`);
+      let inp = (n.inputs || []).find(i => i.key === 'isResponseAnswerText');
+      if (!inp) {
+        inp = { key: 'isResponseAnswerText', label: '', valueType: 'boolean', renderTypeList: ['hidden'], selectedType: 'hidden', value: undefined };
+        n.inputs.push(inp);
+      }
+      const want = !isConsumed;
+      if (inp.value !== want) {
+        changes.push({
+          node: n.nodeId,
+          param: 'isResponseAnswerText',
+          from: inp.value,
+          to: want,
+          reason: isConsumed
+            ? 'answerText 已被 answerNode 消费，关闭节点自身输出以避免重复回复'
+            : '没有 answerNode 消费，开启节点自身输出'
+        });
+        inp.value = want;
+      }
+    }
+
+    // 2. contentExtract：输出是 fields，不参与对话输出，无需处理
+    // 3. datasetSearch：只产出引用数据，无需处理
+  }
+
+  return changes;
+}
+
 // ---------- DSL 构建（wf build / wf validate 共用） ----------
 function buildFromDsl(dsl) {
   const nodes = [];
@@ -586,6 +639,19 @@ const commands = {
     let built;
     try { built = buildFromDsl(dsl); } catch (e) { fail(e.message); }
     let { nodes, edges, chatConfig } = built;
+
+    // 内在参数自动调整（在 modelId 预检之前，避免给出基于错误参数的结论）
+    const tuned = autoTuneNodeParams(nodes);
+    if (tuned.length) {
+      console.error('');
+      console.error('⚙️  已自动调整节点参数：');
+      tuned.forEach(c => {
+        const from = c.from === undefined ? '(未设置)' : c.from;
+        console.error(`   ${c.node}.${c.param}: ${from} → ${c.to}`);
+        console.error(`     ${c.reason}`);
+      });
+      console.error('');
+    }
 
     // 预检：dry-run 纯静态（不触网），真实部署才做网络校验
     if (!f['no-model-hook']) {
@@ -1017,7 +1083,10 @@ const commands = {
       try {
         const j = JSON.parse(data);
         if (ev === 'flowNodeStatus') trace.push(`${j.status}:${j.name}`);
-        if (ev === 'answer') answer += j.choices?.[0]?.delta?.content || '';
+        // answer: chatNode 的流式增量；fastAnswer: answerNode 的一次性输出
+        if (ev === 'answer' || ev === 'fastAnswer') {
+          answer += j.choices?.[0]?.delta?.content || '';
+        }
       } catch {}
     }
     out({ ok: true, trace, answer });

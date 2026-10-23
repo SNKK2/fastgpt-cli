@@ -26,6 +26,18 @@ $ fastgpt doctor
 
 一次看清能不能干活，不用跑到第三步才发现缺东西。
 
+## 内在参数自动调整
+
+几类参数不写就会出错，`wf build` 按节点依赖自动修正：
+
+```
+⚙️  已自动调整节点参数：
+   n_chat.isResponseAnswerText: (未设置) → false
+     answerText 已被 answerNode 消费，关闭节点自身输出以避免重复回复
+```
+
+不调整的后果：`chatNode` 流式输出一次 + `answerNode` 再输出一次 = **同一条回复显示两遍**。
+
 ## 错误契约
 
 所有错误都是结构化 JSON，`hint` 就是下一步操作，`action_required` 决定谁来处理：

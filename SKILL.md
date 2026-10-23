@@ -123,6 +123,37 @@ node "$CLI_ROOT/bin/fastgpt.mjs" help
 cd "$CLI_ROOT" && npm link
 ```
 
+## 内在参数自动调整
+
+DSL 里有几类参数**不写就会出错**，`wf build` 会按节点依赖关系自动修正：
+
+| 参数 | 规则 | 不做会怎样 |
+|---|---|---|
+| `chatNode.isResponseAnswerText` | 输出的 `answerText` 被 `answerNode` 消费 → `false`；无消费者 → `true` | **同一条回复输出两次**（chatNode 流式一次 + answerNode 一次） |
+
+实测现象：
+
+```
+# 修复前
+fastAnswer: "你好呀！很高兴见到你…"        ← answerNode 输出
+answer:     "你好呀" + "，" + "今天" + …   ← chatNode 又流式输出一遍
+
+# 自动调整后
+fastAnswer: "你好呀！很高兴见到你…"        ← 只剩这一个
+answer:     (空)
+```
+
+执行时会打印变更：
+
+```
+⚙️  已自动调整节点参数：
+   n_chat.isResponseAnswerText: (未设置) → false
+     answerText 已被 answerNode 消费，关闭节点自身输出以避免重复回复
+```
+
+**取舍**：接了 `answerNode` 会失去流式效果（`answerNode` 走 `fastAnswer` 一次性输出）。
+如果要流式，就不要接 `answerNode`，让 `chatNode` 直接输出。
+
 ## 错误契约（agent 必读）
 
 所有错误都是结构化 envelope，**`hint` 就是操作指令，`action_required` 决定你该做什么**：
