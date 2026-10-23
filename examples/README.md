@@ -3,8 +3,8 @@
 两个可直接改用的工作流定义。把占位符替换成你自己的 ID 后即可部署：
 
 ```bash
-node bin/fastgpt.mjs wf build examples/dsl-basic.json --dry-run   # 先校验
-node bin/fastgpt.mjs wf build examples/dsl-basic.json             # 再写入
+fastgpt wf build examples/dsl-basic.json --dry-run   # 先校验
+fastgpt wf build examples/dsl-basic.json             # 再写入
 ```
 
 ## dsl-basic.json
@@ -45,7 +45,7 @@ node bin/fastgpt.mjs wf build examples/dsl-basic.json             # 再写入
 `modelId` 是 24 位 ObjectId，不是模型名称。获取方式：
 
 ```bash
-node bin/fastgpt.mjs wf get <任意已有应用ID> | grep -o '"modelId":"[^"]*"'
+fastgpt wf get <任意已有应用ID> | grep -o '"modelId":"[^"]*"'
 ```
 
 传模型名会在发布时报 `Model model is unavailable`。

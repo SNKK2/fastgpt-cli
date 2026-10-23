@@ -79,10 +79,10 @@ cat > my-workflow.json <<'DSL'
 DSL
 
 # 2. 先干跑校验（不触网）
-node bin/fastgpt.mjs wf build my-workflow.json --dry-run
+fastgpt wf build my-workflow.json --dry-run
 
 # 3. 部署
-node bin/fastgpt.mjs wf build my-workflow.json
+fastgpt wf build my-workflow.json
 ```
 
 DSL 里只需要 `type` + `id` + 业务参数，节点结构、连线 handle、selectedType 全部由 CLI 生成。
@@ -90,13 +90,20 @@ DSL 里只需要 `type` + `id` + 业务参数，节点结构、连线 handle、s
 ## 安装与前置
 
 ```bash
-git clone https://github.com/SNKK2/fastgpt-cli.git
-cd fastgpt-cli
-chmod +x bin/fastgpt.mjs
+npm install -g github:SNKK2/fastgpt-cli
 
-node bin/fastgpt.mjs init      # 交互选择部署版本 + 登录
-node bin/fastgpt.mjs doctor    # 环境自检
+fastgpt init      # 交互选择部署版本 + 登录
+fastgpt doctor    # 环境自检
 ```
+
+装完直接用 `fastgpt <命令>`，不需要进入任何目录。
+
+### 不要读源码
+
+`fastgpt` 是全局安装的命令，**没有可读的源码目录**。
+遇到报错时按错误里的 `hint` 走，不要去翻实现或搜索后端源码找绕过方法。
+
+想确认某个命令怎么用：`fastgpt help` 或 `fastgpt <group> <cmd> --help`。
 
 `init` 会列出四种部署版本，选一个即可：
 
@@ -122,7 +129,7 @@ fastgpt init --preset private --base https://fastgpt.yourcompany.com
 非交互环境（agent 调用）用参数形式：
 
 ```bash
-node bin/fastgpt.mjs init --base https://your-host --user <账号> --pass <密码>
+fastgpt init --base https://your-host --user <账号> --pass <密码>
 ```
 
 Node 18+；扫码登录需要 Node 22+ 和本机 Chrome。
@@ -137,24 +144,13 @@ Node 18+；扫码登录需要 Node 22+ 和本机 Chrome。
 可用 `FASTGPT_HOME` 覆盖目录，便于多实例隔离：
 
 ```bash
-FASTGPT_HOME=~/.fastgpt-prod node bin/fastgpt.mjs init
+FASTGPT_HOME=~/.fastgpt-prod fastgpt init
 ```
 
 环境变量 `FASTGPT_BASE` 优先级高于配置文件。
 
-**路径约定**：下文所有 `node bin/fastgpt.mjs` 都假设当前目录是 CLI 仓库根。
-不在根目录时用绝对路径，先记下来：
-
-```bash
-CLI_ROOT=/path/to/fastgpt-cli
-node "$CLI_ROOT/bin/fastgpt.mjs" help
-```
-
-装成全局后可直接用 `fastgpt <cmd>`：
-
-```bash
-cd "$CLI_ROOT" && npm link
-```
+**下文所有示例用全局命令 `fastgpt`**。如果你是用 git clone 装的（开发模式），
+把 `fastgpt` 换成 `node bin/fastgpt.mjs` 即可，但生产使用建议走 `npm i -g`。
 
 ## 环境快照
 

@@ -142,8 +142,8 @@ fastgpt wf build x.json            # 真实写库
 { "type": "chat", "id": "n_chat", "modelId": "<OBJECT_ID>", "question": "n_start:userChatInput" }
 
 # 部署：结构、handle、selectedType 全部自动生成
-node bin/fastgpt.mjs wf build my-workflow.json --dry-run   # 需要登录，验证真实 ID
-node bin/fastgpt.mjs wf build my-workflow.json             # 再写入
+fastgpt wf build my-workflow.json --dry-run   # 需要登录，验证真实 ID
+fastgpt wf build my-workflow.json             # 再写入
 ```
 
 手写 `nodeId` / `sourceHandle` / `flowNodeType` 会踩中下文所有坑。
@@ -165,11 +165,17 @@ FastGPT 的 API 有一批会静默失败的坑，直接手写 HTTP 几乎必踩�
 ## 安装
 
 ```bash
+npm install -g github:SNKK2/fastgpt-cli
+
+fastgpt init     # 配置地址 + 登录
+fastgpt doctor   # 环境自检
+```
+
+### 开发模式
+
+```bash
 git clone https://github.com/SNKK2/fastgpt-cli.git
-cd fastgpt-cli
-chmod +x bin/fastgpt.mjs
-node bin/fastgpt.mjs init     # 配置地址 + 登录
-node bin/fastgpt.mjs doctor   # 环境自检
+cd fastgpt-cli && npm link
 ```
 
 ## 安装（其他方式）
