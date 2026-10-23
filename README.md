@@ -121,6 +121,25 @@ fastgpt wf build x.json            # 真实写库
 覆盖 5 个容易踩坑的成功场景：dry-run 完成后、应用刚创建、
 文档刚上传（训练异步）、检索空结果、对话空回答。
 
+## 强制停止层
+
+有些问题是死路（比如团队没配过模型），CLI 会在本地写阻断状态：
+
+```json
+第一次：
+{ "error": { "subtype": "model_id_unavailable",
+             "dead_end": true, "must_end_turn": true,
+             "resolved_by": "用户在 WebUI 配置模型后运行 fastgpt model id" } }
+
+后续（换参数/换命令）：
+{ "blocked": true,
+  "error": { "dead_end": true,
+             "note": "当前环境已进入阻断状态，换命令或改参数都不会有不同结果" } }
+```
+
+被阻断的命令：`wf build` / `wf publish` / `app create`。
+用户完成配置后 `fastgpt model id` 成功即自动解除。
+
 ## 错误契约
 
 所有错误都是结构化 JSON，`hint` 就是下一步操作，`action_required` 决定谁来处理：

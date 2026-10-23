@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
 import { cliError, exitCodeFor, isCliError, BASE_PRESETS, Notice, withNotice } from '../lib/errors.mjs';
+import { setBlock, getBlock, clearBlock, blockEnvelope } from '../lib/blocker.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
@@ -142,8 +143,16 @@ async function ensureModelIdHook(nodes, { autoFill = true } = {}) {
   try { candidates = await scanModelIds(); } catch {}
 
   if (!candidates.length) {
-    // 结构化输出到 stdout（agent 读这个），人类可读提示到 stderr
     const err = cliError('model_id_unavailable');
+    // 写入强制停止层：后续相关命令都会直接返回同一提示
+    setBlock({
+      code: 'model_id_unavailable',
+      message: err.message,
+      hint: err.hint,
+      forbidden: err.forbidden,
+      mustEndTurn: true,
+      resolvedBy: err.resolvedBy
+    });
     console.error('');
     console.error('❌ ' + err.message);
     console.error('');
@@ -817,6 +826,8 @@ const commands = {
       process.exit(1);
     }
 
+    // 成功拿到 modelId → 解除阻断
+    clearBlock();
     out(want ? found.filter(x => x.modelId === want) : found);
   },
 
@@ -1525,7 +1536,18 @@ const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' ||
 const offlineCmds = new Set(['wf lint', 'wf validate']);
 const isOffline = offlineCmds.has(key);
 
+// 会被 modelId 阻断影响的命令
+const blockedByModelId = new Set(['wf build', 'wf publish', 'app create']);
+
 async function run(handler, handlerArgs, handlerFlags) {
+  // 强制停止层：撞过死路就不要再试了
+  if (blockedByModelId.has(key)) {
+    const block = getBlock();
+    if (block?.code === 'model_id_unavailable') {
+      out(blockEnvelope(block));
+      process.exit(14);
+    }
+  }
   if (!authGroup && !isOffline) {
     if (!isConfigured()) {
       failCli('not_configured', {

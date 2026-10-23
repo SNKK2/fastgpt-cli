@@ -17,7 +17,45 @@ description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI �
 | 看到 `{"code":200}` 就当成功 | `app/update` / `version/update` 是假保存，数据被静默 strip | 用 `wf build`，拉回校验 |
 | 自己算 handle id | `${nodeId}-source-${key}` 顺序反了 UI 不渲染，但运行时照样跑 | `edge()` 或 DSL 数组 |
 
-### 🚨 红线二：缺关键信息时，必须问用户，禁止绕过
+### 🚨 红线二：遇到 dead_end 必须停
+
+有些错误带 `dead_end: true` 和 `must_end_turn: true`，意思是：
+
+**这条路没有替代走法，把消息发给用户，结束本轮。**
+
+典型是 `model_id_unavailable`（团队没配过模型）。它的 hint 里写明了为什么绕过没用：
+
+```
+⚠️ 这条路没有替代走法：
+  · 修改 CLI 源码去掉校验 → 服务端 version/publish 仍会拒绝
+  · 直接调 FastGPT API 传模型名 → 同样返回 Model model is unavailable
+  · 编造 24 位 hex → 格式能过，发布时一定失败
+  · 换用其他命令或改 DSL 参数 → 结果完全相同
+```
+
+**看到 `dead_end` 就停下。** 不要读源码、不要改 CLI、不要换命令重试。
+
+### 强制停止层
+
+撞上 dead_end 后，CLI 会在本地写一个阻断状态。后续 `wf build` / `wf publish` / `app create`
+会直接返回：
+
+```json
+{
+  "ok": false,
+  "blocked": true,
+  "error": {
+    "subtype": "model_id_unavailable",
+    "dead_end": true,
+    "note": "当前环境已进入阻断状态，换命令或改参数都不会有不同结果"
+  }
+}
+```
+
+**看到 `blocked: true` 不要再试任何相关命令。** 阻断会在用户完成配置、
+`fastgpt model id` 成功返回后自动解除（24 小时未解除会自动失效）。
+
+### 🚨 红线三：缺关键信息时，必须问用户，禁止绕过
 
 需要以下任一项但当前没有时，**停下来向用户索要**，不要用占位符或伪造值硬走：
 

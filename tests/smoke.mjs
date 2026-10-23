@@ -3,6 +3,7 @@
 import { node, VARP, REF } from '../lib/nodes.mjs';
 import { validateWorkflow, edge, chain } from '../lib/validate.mjs';
 import { cliError, BASE_PRESETS, Notice, withNotice, exitCodeFor } from '../lib/errors.mjs';
+import { blockEnvelope } from '../lib/blocker.mjs';
 
 let pass = 0, fail = 0;
 const results = [];
@@ -246,6 +247,35 @@ section('dry-run / lint 语义');
   ok('not_logged_in 要求问用户', e.actionRequired === 'user');
   ok('not_logged_in 提示结束本轮', /结束本轮/.test(e.hint || ''));
   ok('not_logged_in 禁止占位符交付', /不要跳过登录直接写 DSL 或用占位符交付/.test(e.forbidden || ''));
+}
+
+// ---------- 7. 强制停止层 ----------
+section('强制停止层');
+
+{
+  const e = cliError('model_id_unavailable');
+  const env = e.toEnvelope();
+  ok('model_id_unavailable 标记 dead_end', env.error.dead_end === true);
+  ok('model_id_unavailable 标记 must_end_turn', env.error.must_end_turn === true);
+  ok('model_id_unavailable 有 resolved_by', !!env.error.resolved_by);
+  ok('hint 点明改源码无用', /修改 CLI 源码.*服务端/.test(env.error.hint || ''));
+  ok('hint 点明直接调 API 无用', /直接调 FastGPT API.*同样返回/.test(env.error.hint || ''));
+  ok('hint 要求结束本轮', /结束本轮/.test(env.error.hint || ''));
+  ok('forbidden 禁止改源码', /不要修改 CLI 源码/.test(env.error.forbidden || ''));
+  ok('forbidden 禁止换命令重试', /换命令重试/.test(env.error.forbidden || ''));
+}
+
+// blockEnvelope 结构
+{
+  const env = blockEnvelope({
+    code: 'model_id_unavailable',
+    message: 'test', hint: 'h', forbidden: 'f',
+    mustEndTurn: true, resolvedBy: 'r',
+    blockedAt: new Date().toISOString()
+  });
+  ok('blockEnvelope 有 blocked 标记', env.blocked === true);
+  ok('blockEnvelope 有 note', /换命令或改参数都不会有不同结果/.test(env.error.note || ''));
+  ok('blockEnvelope 保持 dead_end', env.error.dead_end === true);
 }
 
 // ---------- 输出 ----------
