@@ -6,6 +6,7 @@ import path from 'node:path';
 import { client, loginRaw, whoami, FastGPTError, isConfigured, saveConfig, getBase, CONFIG_PATH, HOME } from '../lib/client.mjs';
 import { cliError, exitCodeFor, isCliError, BASE_PRESETS, WEBSITE_TO_PRESET, Notice, withNotice } from '../lib/errors.mjs';
 import { setBlock, getBlock, clearBlock, blockEnvelope } from '../lib/blocker.mjs';
+import { mergeCollaboratorList, updateCollaborators, RESOURCES } from '../lib/collaborators.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
@@ -1535,12 +1536,10 @@ const commands = {
     if (f.set) {
       const [tmbId, perm] = String(f.set).split(':');
       if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（1管理 2写 4读，相加）');
-      const collaborators = await mergeCollaborators(
-        '/api/proApi/core/dataset/collaborator/list', 'datasetId', id, tmbId, Number(perm));
-      await client.post('/api/proApi/core/dataset/collaborator/update', {
-        datasetId: id, collaborators
+      const r = await updateCollaborators({
+        ...RESOURCES.dataset, id, tmbId, permission: Number(perm)
       });
-      out({ ok: true, datasetId: id, tmbId, permission: Number(perm), total: collaborators.length });
+      out({ ok: true, datasetId: id, tmbId, permission: Number(perm), total: r.count });
     } else {
       const d = await client.get(`/api/proApi/core/dataset/collaborator/list?datasetId=${id}`);
       out((d.clbs || []).map(c => ({ tmbId: c.tmbId, name: c.name, permission: c.permission?.permission,
@@ -1553,12 +1552,10 @@ const commands = {
     const id = f.id || args[0];
     if (f.set) {
       const [tmbId, perm] = String(f.set).split(':');
-      const collaborators = await mergeCollaborators(
-        '/api/proApi/core/dataset/collection/collaborator/list', 'collectionId', id, tmbId, Number(perm));
-      await client.post('/api/proApi/core/dataset/collection/collaborator/update', {
-        collectionId: id, collaborators
+      const r = await updateCollaborators({
+        ...RESOURCES.collection, id, tmbId, permission: Number(perm)
       });
-      out({ ok: true, collectionId: id, tmbId, permission: Number(perm), total: collaborators.length });
+      out({ ok: true, collectionId: id, tmbId, permission: Number(perm), total: r.count });
     } else {
       const d = await client.get(`/api/proApi/core/dataset/collection/collaborator/list?collectionId=${id}`);
       out((d.clbs || []).map(c => ({ tmbId: c.tmbId, name: c.name, permission: c.permission?.permission,
@@ -1573,12 +1570,10 @@ const commands = {
     if (f.set) {
       const [tmbId, perm] = String(f.set).split(':');
       if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（权限 1管理 2写 4读，相加）');
-      const collaborators = await mergeCollaborators(
-        '/api/proApi/core/app/collaborator/list', 'appId', id, tmbId, Number(perm));
-      await client.put('/api/proApi/core/app/collaborator/update', {
-        appId: id, collaborators
+      const r = await updateCollaborators({
+        ...RESOURCES.app, id, tmbId, permission: Number(perm)
       });
-      out({ ok: true, appId: id, tmbId, permission: Number(perm), total: collaborators.length });
+      out({ ok: true, appId: id, tmbId, permission: Number(perm), total: r.count });
       return;
     }
     if (f.del) {
@@ -1799,21 +1794,6 @@ const authGroup = pos[0] === 'auth' || pos[0] === 'help' || pos[0] === 'init' ||
 // 只有 lint 是离线的（纯语法检查）。dry-run 必须登录，因为它要验证真实 ID。
 const offlineCmds = new Set(['wf lint', 'wf validate']);
 const isOffline = offlineCmds.has(key);
-
-/** 查资源现有协作者，合并成完整列表（FastGPT 要求全量覆盖，不是增量） */
-async function mergeCollaborators(listPath, idKey, id, tmbId, permission) {
-  let existing = [];
-  try {
-    const cur = await client.get(`${listPath}?${idKey}=${id}`);
-    existing = (cur.clbs || [])
-      .map(c => ({ tmbId: c.tmbId, permission: c.permission?.permission }))
-      .filter(x => x.tmbId && typeof x.permission === 'number');
-  } catch {}
-  const map = new Map(existing.map(x => [x.tmbId, x.permission]));
-  if (permission === 0) map.delete(tmbId);
-  else map.set(tmbId, permission);
-  return [...map].map(([t, p]) => ({ tmbId: t, permission: p }));
-}
 
 // 会被 modelId 阻断影响的命令
 const blockedByModelId = new Set(['wf build', 'wf publish', 'app create']);

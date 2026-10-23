@@ -623,7 +623,11 @@ fastgpt ds del <collectionId>
 fastgpt ds perm <datasetId> on                   # 开启文档级权限
 
 # ============ 权限（permission: 1管理 2写 4读，相加）============
-# 读写=6  只读=4  全权=7
+# 读写=6  只读=4  全权=7  传 0 表示移除
+
+# ⚠️ collaborators 是「完整列表」语义，不是增量。
+#    CLI 已自动先查现状再合并，不用手动处理。但如果直接调 API，
+#    只传新成员等于把 admin 删掉，会报 can_not_edit_admin_permission。
 
 # 知识库 / 集合 / 应用
 fastgpt perm dataset <datasetId>                     # 查协作者

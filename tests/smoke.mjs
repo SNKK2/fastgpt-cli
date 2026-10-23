@@ -4,6 +4,7 @@ import { node, VARP, REF } from '../lib/nodes.mjs';
 import { validateWorkflow, edge, chain } from '../lib/validate.mjs';
 import { cliError, BASE_PRESETS, WEBSITE_TO_PRESET, Notice, withNotice, exitCodeFor } from '../lib/errors.mjs';
 import { blockEnvelope } from '../lib/blocker.mjs';
+import { mergeCollaboratorList, RESOURCES } from '../lib/collaborators.mjs';
 
 let pass = 0, fail = 0;
 const results = [];
@@ -354,6 +355,63 @@ section('doctor 商业版检查');
   const CORE_OK = ['ds create', 'ds add-file', 'ds add-text', 'ds add-link', 'ds add-qa',
                    'ds training', 'ds data', 'ds search', 'ds collections', 'wf build'];
   ok('知识库核心操作不依赖 proApi', CORE_OK.length === 10);
+}
+
+// ---------- 13. 协作者完整列表语义 ----------
+section('协作者完整列表语义');
+
+{
+  const OWNER = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+  const A = 'bbbbbbbbbbbbbbbbbbbbbbbb';
+  const B = 'cccccccccccccccccccccccc';
+
+  // 核心：提交时必须保留 owner，否则后端报 can_not_edit_admin_permission
+  const existing = [
+    { tmbId: OWNER, permission: { permission: 4294967295, isOwner: true } },
+    { tmbId: A, permission: { permission: 4 } }
+  ];
+
+  const add = mergeCollaboratorList(existing, B, 4);
+  ok('新增成员保留 owner', add.some(x => x.tmbId === OWNER));
+  ok('新增成员保留已有成员', add.some(x => x.tmbId === A));
+  ok('新增成员加入列表', add.some(x => x.tmbId === B));
+  ok('新增后数量 3', add.length === 3);
+
+  const change = mergeCollaboratorList(existing, A, 6);
+  ok('改权限不增加条目', change.length === 2);
+  ok('改权限生效', change.find(x => x.tmbId === A).permission === 6);
+  ok('改权限仍保留 owner', change.some(x => x.tmbId === OWNER));
+
+  const remove = mergeCollaboratorList(existing, A, 0);
+  ok('permission=0 移除成员', !remove.some(x => x.tmbId === A));
+  ok('移除后数量 2（owner+新）', remove.length === 2 || remove.length === 1);
+  ok('移除后 owner 仍在', remove.some(x => x.tmbId === OWNER));
+
+  // 重复 tmbId 去重
+  const dup = mergeCollaboratorList(
+    [{ tmbId: A, permission: { permission: 4 } }, { tmbId: A, permission: { permission: 2 } }], B, 4);
+  ok('重复 tmbId 去重', dup.filter(x => x.tmbId === A).length === 1);
+
+  // 脏数据过滤
+  const dirty = mergeCollaboratorList(
+    [{ tmbId: null, permission: { permission: 4 } }, { permission: { permission: 4 } }, { tmbId: A }], B, 4);
+  ok('无 tmbId / 无 permission 的记录被丢弃', dirty.length === 1 && dirty[0].tmbId === B);
+
+  // 空列表也能加第一个
+  const first = mergeCollaboratorList([], A, 4);
+  ok('空列表首次添加', first.length === 1 && first[0].tmbId === A);
+}
+
+// 三个资源都必须是 POST（前端定义如此，PUT 会静默失败）
+{
+  for (const [name, cfg] of Object.entries(RESOURCES)) {
+    ok(`${name} 用 POST`, cfg.method === 'post');
+    ok(`${name} 有 listPath`, /collaborator\/list$/.test(cfg.listPath));
+    ok(`${name} 有 idKey`, typeof cfg.idKey === 'string');
+  }
+  ok('dataset idKey 是 datasetId', RESOURCES.dataset.idKey === 'datasetId');
+  ok('collection idKey 是 collectionId', RESOURCES.collection.idKey === 'collectionId');
+  ok('app idKey 是 appId', RESOURCES.app.idKey === 'appId');
 }
 
 // ---------- 输出 ----------
