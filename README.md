@@ -205,8 +205,7 @@ fastgpt auth whoami
 fastgpt model id        # 扫描团队应用，自动提取
 # 如果返回空，说明团队还没有应用配过模型 → 按提示去 WebUI 点一次模型下拉框
 
-# 某些部署接受模型名（会打印警告）
-fastgpt wf build my.json --allow-model-name
+
 
 # 4. 找知识库 ID
 fastgpt ds list
