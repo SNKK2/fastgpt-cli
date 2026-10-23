@@ -843,7 +843,10 @@ const commands = {
     const appId = await client.post('/api/core/app/create', {
       name, type, avatar: f.avatar || 'core/app/type/workflowFill', intro: f.intro || ''
     });
-    out(withNotice({ ok: true, appId }, Notice.appCreated(appId)));
+    out(withNotice(
+      { ok: true, appId },
+      type === 'plugin' ? Notice.pluginPublished(appId) : Notice.appCreated(appId)
+    ));
   },
 
   async 'app delete'(args, f) {
@@ -1022,7 +1025,10 @@ const commands = {
       nodes: d.nodes, edges: d.edges, chatConfig: d.chatConfig,
       isPublish: true, autoSave: false, versionName: f.name || 'publish'
     });
-    out(withNotice({ ok: true, appId }, Notice.appCreated(appId)));
+    out(withNotice(
+      { ok: true, appId },
+      type === 'plugin' ? Notice.pluginPublished(appId) : Notice.appCreated(appId)
+    ));
   },
 
   // ===== 知识库 =====

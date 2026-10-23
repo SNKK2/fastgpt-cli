@@ -220,6 +220,79 @@ fastgpt info --json     # 结构化，给 agent 解析
 
 **看到 `_notice` 就按 `hint` 走下一步，不要忽略。**
 
+## 工具调用（agent v2）
+
+**不要用 `agent` 节点挂工具**（`agent_selectedTools` 发布时报 appUnExist）。
+正确结构是 `tools` 节点 + `pluginModule` 节点，用特殊 handle 连线：
+
+```
+start → tools ─[sourceHandle: "selectedTools"]→ pluginModule（工具1）
+              └[sourceHandle: "selectedTools"]→ pluginModule（工具2）
+              └[sourceHandle: "right"]→ answer
+```
+
+DSL 写法：
+
+```json
+{
+  "nodes": [
+    { "type": "start", "id": "n_start" },
+    { "type": "toolCall", "id": "n_tools", "modelId": "<ID>",
+      "question": "n_start:userChatInput",
+      "prompt": "你是知识库管家。问有哪些知识库时调用查询工具。" },
+    { "type": "pluginModule", "id": "pm_query",
+      "appId": "<plugin应用ID>", "name": "查询知识库",
+      "params": [{ "key": "searchKey", "label": "搜索词" }] },
+    { "type": "answer", "id": "n_answer", "content": "n_tools:answerText" }
+  ],
+  "edges": [
+    ["n_start", "n_tools"],
+    ["n_tools", "n_answer"]
+  ]
+}
+```
+
+**注意**：`selectedTools` 连线不能用 `["源","目标"]` 简写（那个生成的 handle 是 `-source-right`），
+要写完整对象：
+
+```json
+{ "source":"n_tools", "sourceHandle":"selectedTools",
+  "target":"pm_query", "targetHandle":"selectedTools" }
+```
+
+### 四个必须避开的坑
+
+| 坑 | 错误 | 正确 |
+|---|---|---|
+| **工具挂载节点** | `agent` + `agent_selectedTools` | `pluginModule` + `selectedTools` edge |
+| **HTTP 头字段** | `system_httpHeaders` | `system_httpHeader`（单数） |
+| **工具参数模式** | `selectedType: 'input'` | `agentGenerated` + `defaultToAgentGenerated: true` |
+| **变量引用** | `{{$pluginInput.xxx$}}` | `{{$<实际nodeId>.xxx$}}` |
+
+第四点最容易踩：`pluginInput` 是别名，引用要用节点的真实 `nodeId`
+（比如 `n_input`），写成 `{{$n_input.datasetName$}}`。
+
+用 helper 生成：`VARP('n_input', 'datasetName')` → `"{{$n_input.datasetName$}}"`
+
+### 工作流工具（plugin）的搭建
+
+```
+pluginInput(参数) → httpRequest468(调 API) → pluginOutput(结果)
+```
+
+```js
+import { node, VARP } from './lib/nodes.mjs';
+
+const pin = node.pluginInput('n_input', { params: [{ key:'datasetName', label:'知识库名称', required:true }] });
+const http = node.http('n_http', {
+  url: 'https://your-host/api/core/dataset/create',
+  method: 'POST',
+  headers: [{ key:'Authorization', value:'Bearer <API_KEY>', type:'string' }],
+  jsonBody: `{"parentId":null,"type":"dataset","name":"${VARP('n_input','datasetName')}","intro":""}`
+});
+const pout = node.pluginOutput('n_output', { from: ['n_http','httpRawResponse'] });
+```
+
 ## 内在参数自动调整
 
 DSL 里有几类参数**不写就会出错**，`wf build` 会按节点依赖关系自动修正：
