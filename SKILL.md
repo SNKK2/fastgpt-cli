@@ -163,8 +163,32 @@ fastgpt info --json     # 结构化，给 agent 解析
   ✗ 新增模型
 ```
 
-**agent 用 `--json`**，字段：`identity` / `team` / `permissions` / `plan` /
+**agent 用 `--json`**，字段：`identity` / `team` / `permissions` / `can` / `plan` /
 `members` / `models` / `apps` / `datasets` / `apiKeys` / `ready` / `summary`。
+
+### `can` —— 语义化能力（推荐 agent 读这个）
+
+`permissions` 是 17 个原始布尔字段（`hasDatasetCreatePer` 之类，难记）。
+`can` 是派生出的语义化版本：
+
+```json
+"can": {
+  "read": true,
+  "write": true,           // 能创建/编辑工作流
+  "createApp": true,
+  "createDataset": true,
+  "createApiKey": true,
+  "createSkill": true,
+  "manageModels": false,   // 能新增模型
+  "manageMembers": false,  // 能管理成员权限
+  "isOwner": false,
+  "readOnly": false        // = !write
+}
+```
+
+**判断能不能做某事，直接读 `can.xxx`，不要去猜原始字段名。**
+
+`readOnly: true` 说明账号只能看不能改 —— 此时不应尝试任何写操作。
 
 ## 内在参数自动调整
 

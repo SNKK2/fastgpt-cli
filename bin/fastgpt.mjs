@@ -376,7 +376,7 @@ const commands = {
     ]);
 
     // ---- 身份与权限 ----
-    let identity = null, team = null, permissions = null;
+    let identity = null, team = null, permissions = null, can = null;
     if (me) {
       const t = me.team || {};
       identity = {
@@ -389,6 +389,20 @@ const commands = {
       permissions = Object.fromEntries(
         Object.entries(p).filter(([, v]) => typeof v === 'boolean')
       );
+      // 派生：语义化能力判断，agent 直接读 can.xxx，不用记原始字段名
+      const b = k => p[k] === true;
+      can = {
+        read: b('hasReadPer') || b('isOwner'),
+        write: b('hasWritePer') || b('isOwner'),
+        createApp: b('hasAppCreatePer') || b('hasAppCreateRole') || b('isOwner'),
+        createDataset: b('hasDatasetCreatePer') || b('hasDatasetCreateRole') || b('isOwner'),
+        createApiKey: b('hasApikeyCreatePer') || b('hasApikeyCreateRole') || b('isOwner'),
+        createSkill: b('hasSkillCreatePer') || b('hasSkillCreateRole') || b('isOwner'),
+        manageModels: b('hasModelCreatePer') || b('hasModelCreateRole') || b('isOwner'),
+        manageMembers: b('hasManagePer') || b('isOwner'),
+        isOwner: b('isOwner')
+      };
+      can.readOnly = !can.write;
     }
 
     // ---- 套餐 ----
@@ -490,7 +504,7 @@ const commands = {
       ok: !errs.length,
       base: getBase(),
       elapsed: `${Date.now() - t0}ms`,
-      identity, team, permissions, plan: planInfo,
+      identity, team, permissions, can, plan: planInfo,
       members: memberInfo, models: modelInfo,
       apps: appInfo, datasets: dsInfo, apiKeys: keyInfo,
       ...(deepInfo ? { deep: deepInfo } : {}),
@@ -499,7 +513,8 @@ const commands = {
         ? '未登录，无法获取信息'
         : `${memberInfo?.total ?? '?'} 名成员 / ${modelInfo?.total ?? '?'} 个模型 / ${appInfo?.total ?? '?'} 个应用 / ${dsInfo?.total ?? '?'} 个知识库`
             + (planInfo?.surplusPoints != null ? ` / 剩余积分 ${planInfo.surplusPoints}` : '')
-            + (deep ? ` / ${deepInfo.modelIds.length} 个可用 modelId` : ''),
+            + (deep ? ` / ${deepInfo.modelIds.length} 个可用 modelId` : '')
+            + (can?.readOnly ? ' / ⚠ 只读账号' : ''),
       ...(errs.length ? { errors: errs } : {})
     };
 
@@ -522,9 +537,9 @@ const commands = {
 
     L.push(`  ${pad('用户', 10)}${identity.username}`);
     L.push(`  ${pad('团队', 10)}${team.name}`);
-    const roleText = permissions?.isOwner ? '管理员（owner）'
-      : permissions?.hasManagePer ? '管理员'
-      : permissions?.hasWritePer ? '可写成员'
+    const roleText = can?.isOwner ? '管理员（owner）'
+      : can?.manageMembers ? '管理员'
+      : can?.write ? '可写成员'
       : '只读成员';
     L.push(`  ${pad('身份', 10)}${roleText}`);
 
@@ -561,11 +576,11 @@ const commands = {
     L.push('  能力');
     L.push('  ' + line);
     const cap = (ok, text) => L.push(`  ${ok ? '✓' : '✗'} ${text}`);
-    cap(permissions?.hasWritePer !== false, '创建 / 编辑工作流');
-    cap(permissions?.hasDatasetCreatePer !== false, '创建知识库');
-    cap(permissions?.hasApikeyCreatePer !== false, '创建 API Key');
-    cap(!!permissions?.hasManagePer, '管理成员与权限');
-    cap(!!permissions?.hasModelCreatePer, '新增模型');
+    cap(can?.write, '创建 / 编辑工作流');
+    cap(can?.createDataset, '创建知识库');
+    cap(can?.createApiKey, '创建 API Key');
+    cap(can?.manageMembers, '管理成员与权限');
+    cap(can?.manageModels, '新增模型');
     L.push('');
 
     if (deepInfo?.workflows?.length) {

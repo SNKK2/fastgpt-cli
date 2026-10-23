@@ -38,6 +38,21 @@ fastgpt info --json   # 结构化
   ✗ 管理成员与权限
 ```
 
+### `can` —— 语义化能力
+
+`--json` 里除了原始 `permissions`（17 个 `hasXxxPer` 字段），还有派生出的 `can`：
+
+```json
+"can": {
+  "read": true, "write": true,
+  "createApp": true, "createDataset": true, "createApiKey": true,
+  "manageModels": false, "manageMembers": false,
+  "isOwner": false, "readOnly": false
+}
+```
+
+agent 直接读 `can.createDataset` 即可，不用记 `hasDatasetCreatePer`。
+
 ## 环境自检
 
 ```bash
