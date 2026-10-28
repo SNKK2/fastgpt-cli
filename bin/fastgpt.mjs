@@ -11,6 +11,7 @@ import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthErro
 import { node } from '../lib/nodes.mjs';
 import { edge, validateWorkflow, normalizeWorkflow } from '../lib/validate.mjs';
 import { diffWorkflow } from '../lib/diff.mjs';
+import { compareRuleset, calibrateRuleset, DIAGNOSTIC_CODES } from '../lib/ruleset.mjs';
 
 const out = o => console.log(JSON.stringify(o, null, 2));
 
@@ -1446,6 +1447,44 @@ const commands = {
       type: 'verify_passed',
       message: '全链路通过',
       hint: mode === 'shadow' ? '影子应用已删除（--keep 可保留）；生产应用尚未写入' : undefined
+    }));
+  },
+
+  /**
+   * 规则集对齐：本地校验规则是照某一版平台行为写死的，平台升级会漂。
+   * 这个命令拉目标实例版本，与内置规则集校准版本比对，让漂移可见。
+   * 只能比版本号 —— 要拿到目标实例真实码集必须抓它的前端 chunk（见 --calibrate）。
+   */
+  async 'wf ruleset'(args, f) {
+    let systemVersion;
+    let base = client.base;
+    try {
+      const d = await client.get('/api/common/system/getInitData');
+      systemVersion = d?.systemVersion;
+    } catch (e) {
+      // 未登录也能报出版本（有些实例该接口公开）；真拿不到就标 unknown
+    }
+    const cmp = compareRuleset({ targetVersion: systemVersion });
+
+    if (f.calibrate) {
+      out({ ok: true, base, target: { systemVersion }, compare: cmp, calibrate: calibrateRuleset() });
+      return;
+    }
+
+    out(withNotice({
+      ok: true,
+      base,
+      target: { systemVersion: systemVersion || 'unknown' },
+      compare: cmp,
+      localIssueCodes: Object.keys(cmp).length ? undefined : undefined,
+      officialCodeSample: DIAGNOSTIC_CODES.slice(0, 6),
+      next: cmp.versionMatch
+        ? '版本对齐。校验结论可直接参考；平台升级后再跑一次本命令'
+        : '版本漂移：跑 fastgpt wf ruleset --calibrate 获取重新校准步骤'
+    }, cmp.versionMatch ? null : {
+      type: 'ruleset_drift',
+      message: `内置规则集按 ${cmp.calibratedWith} 校准，目标实例是 ${cmp.targetVersion}`,
+      hint: '版本不一致不代表一定错，但「平台新增的规则我不知道」这类风险会出现；按 --calibrate 的步骤重新校准'
     }));
   },
 
