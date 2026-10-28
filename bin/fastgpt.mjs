@@ -30,6 +30,19 @@ const fail = (msg, extra = {}) => {
 };
 
 
+// ---------- 核心原则：一句话，出现在每个必经出口 ----------
+// 为什么放在输出里而不是文档里：agent 只读返回值，不读 README。
+const PRINCIPLE = {
+  one_liner: 'AI 只负责把话翻译成参数，能力全部做成工具；加能力就加工具，别在流程里加分支。',
+  en: "Translate, don't decide. Capabilities are tools, not branches.",
+  why: [
+    'AI 做自然语言理解（选哪个工具、传什么参数），不做数据计算',
+    '工具做执行（过滤/聚合/渲染），并返回人话口径供 AI 收尾',
+    '加一个维度/换一张表 = 加或改工具，不是改流程代码'
+  ],
+  anti_pattern: '在一个 code 节点里写 44KB 的意图解析引擎（detectChartType / 字段别名表 / 中文问法正则）—— 那是死工作流'
+};
+
 // ---------- 命令文档：让 --help 能逐层下钻 ----------
 // agent 的第一反应就是 `xxx --help`；以前 `fastgpt wf --help` 直接报「未知命令: wf」。
 const COMMAND_DOC = {
@@ -1654,12 +1667,13 @@ const commands = {
    * 目标：用户或 agent 不用读文档，也不用问人，敲 `fastgpt start` 就知道下一步。
    */
   async 'start'(args, f) {
+    const P = PRINCIPLE;  // 每次开工都先看到原则
     const st = readState();
     const ctx = { base: getBase() || null, loggedIn: false, workflowFile: null, apikey: false, shadowApps: st.shadowApps || [] };
 
     // 1) 地址
     if (!ctx.base) {
-      out({ ok: true, next_command: 'fastgpt init --preset cn',
+      out({ principle: P, ok: true, next_command: 'fastgpt init --preset cn',
             why: '还没配置 FastGPT 地址。国内 SaaS 用 --preset cn，自建/私有化用 --base <url>',
             context: ctx });
       return;
@@ -1668,7 +1682,7 @@ const commands = {
     // 2) 登录
     try { await client.get('/api/support/user/account/tokenLogin'); ctx.loggedIn = true; } catch {}
     if (!ctx.loggedIn) {
-      out({ ok: true, next_command: 'fastgpt auth login',
+      out({ principle: P, ok: true, next_command: 'fastgpt auth login',
             why: `已配置 ${ctx.base}，但当前没有有效登录态`,
             context: ctx });
       return;
@@ -1684,7 +1698,7 @@ const commands = {
     }
     ctx.apikey = fs.existsSync('.fastgpt/apikey');
     if (!ctx.workflowFile) {
-      out({ ok: true, next_command: 'fastgpt app list',
+      out({ principle: P, ok: true, next_command: 'fastgpt app list',
             why: '当前目录没有工作流 JSON。若是要改线上已有的，用 wf get <appId> 导出后再处理',
             context: ctx });
       return;
@@ -1696,13 +1710,13 @@ const commands = {
                  codes: [...new Set(r.issues.map(i => i.code))] };
 
     if (r.autoFixable > 0 || r.fixes.length > 0) {
-      out({ ok: true, next_command: `fastgpt wf lint ${ctx.workflowFile} --fix fixed.json --inline-consts`,
+      out({ principle: P, ok: true, next_command: `fastgpt wf lint ${ctx.workflowFile} --fix fixed.json --inline-consts`,
             why: `${ctx.workflowFile} 有 ${r.fixes.length + r.autoFixable} 项可以自动修（连线形态/变量写法/常量内联…），先修再验`,
             context: ctx });
       return;
     }
     if (!r.ok) {
-      out({ ok: true, next_command: `fastgpt wf lint ${ctx.workflowFile}`,
+      out({ principle: P, ok: true, next_command: `fastgpt wf lint ${ctx.workflowFile}`,
             why: `有 ${r.manualFixRequired} 项必须改内容（${ctx.lint.codes.join(', ')}），命令会给出逐条位置`,
             context: ctx });
       return;
@@ -1710,13 +1724,13 @@ const commands = {
 
     // 5) 能跑一条龙了吗
     if (!ctx.apikey) {
-      out({ ok: true, next_command: 'fastgpt apikey create --name cli',
+      out({ principle: P, ok: true, next_command: 'fastgpt apikey create --name cli',
             why: '结构已就绪。运行时验证需要 OpenAPI key（会写到 ./.fastgpt/apikey）',
             context: ctx });
       return;
     }
     const vars = f.variables ? ` --variables '${f.variables}'` : '';
-    out({ ok: true,
+    out({ principle: P, ok: true,
           next_command: `fastgpt wf verify ${ctx.workflowFile}${vars}`,
           why: '结构通过、密钥就绪。verify 会建影子应用跑完整链路（含部署/diff/运行时），跑完自动删除',
           context: { ...ctx, tip: '想连同前端画面一起验：追加 --ui-cmd \'node scripts/check-ui.mjs {appId}\'' },
@@ -1862,7 +1876,7 @@ const commands = {
     }, {
       type: 'agent_scaffold',
       message: 'agent 骨架已生成',
-      hint: 'pluginModule 的 params 已按工具真实入参自动填好；缺参数时工具会「正常返回空结果」，wf build 会拦这个'
+      hint: PRINCIPLE.one_liner + '\n（pluginModule 的 params 已按工具真实入参自动填好；缺参数时工具会「正常返回空结果」，wf build 会拦这个）'
     }));
   },
 
@@ -1928,7 +1942,7 @@ const commands = {
     }, {
       type: 'tool_scaffold',
       message: '工具骨架已生成',
-      hint: 'code 必须写成 function main({ 解构参数 })；内部变量不要与参数重名（这两条 wf lint 会拦）'
+      hint: PRINCIPLE.one_liner + '\n（code 必须写成 function main({ 解构参数 })；内部变量不要与参数重名，wf lint 会拦）'
     }));
   },
 
@@ -2581,6 +2595,7 @@ const commands = {
     }
 
     out({
+      principle: PRINCIPLE,
       usage: 'fastgpt <group> <cmd> [args] [flags]',
       groups: {
         init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],

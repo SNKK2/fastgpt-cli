@@ -1,5 +1,12 @@
 # fastgpt-cli
 
+> **AI 只负责把话翻译成参数，能力全部做成工具；加能力就加工具，别在流程里加分支。**
+> `Translate, don't decide. Capabilities are tools, not branches.`
+
+这条原则出现在 `help` / `start` / `tool new` / `agent new` 的输出里，并由 `wf lint` 做硬检测：
+code 节点里出现 `detectChartType` / 字段别名表 / 中文问法正则 → warning 提示拆成工具。
+
+
 > 用命令行管理 FastGPT 的全部资源 —— 工作流、知识库、权限、发布渠道、运行调试。
 > 为 **AI agent 设计**：每次输出都是 JSON，每条报错都是下一步的操作手册。
 
