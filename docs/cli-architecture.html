@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fastgpt-cli 0.2.0 — 架构 / 命令流程 / 数据链路</title>
+<style>
+  :root{
+    --bg:#080d18; --panel:#111a2b; --panel2:#16213594; --line:#22304a;
+    --tx:#e8eef8; --tx2:#9aabc5; --tx3:#647791;
+    --indigo:#818cf8; --cyan:#22d3ee; --green:#34d399; --amber:#fbbf24; --red:#fb7185; --violet:#c084fc;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;color:var(--tx); background:
+      radial-gradient(900px 480px at 85% -8%,rgba(129,140,248,.14),transparent 60%),
+      radial-gradient(700px 420px at 5% 0%,rgba(34,211,238,.10),transparent 60%),
+      var(--bg);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  code,pre,.mono{font-family:"SF Mono",Menlo,Consolas,"Liberation Mono",monospace}
+  .wrap{max-width:1260px;margin:0 auto;padding:40px 26px 90px}
+  h1{font-size:30px;margin:0 0 8px;letter-spacing:-.5px}
+  h2{font-size:20px;margin:58px 0 8px;letter-spacing:-.2px;display:flex;align-items:center;gap:10px}
+  h2 .n{font:700 12px/1 monospace;color:#060a13;background:var(--indigo);padding:5px 8px;border-radius:6px}
+  h3{font-size:14.5px;margin:26px 0 10px;letter-spacing:.2px}
+  p{margin:8px 0;color:var(--tx2)}
+  .sub{color:var(--tx2);max-width:900px}
+
+  .hero{border:1px solid var(--line);border-radius:16px;padding:26px 28px;background:linear-gradient(155deg,#131d33,#0b1220 62%);position:relative;overflow:hidden}
+  .hero:after{content:"";position:absolute;right:-60px;top:-90px;width:380px;height:380px;border-radius:50%;background:radial-gradient(circle,rgba(129,140,248,.18),transparent 68%)}
+  .badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .badge{font:600 12px/1 monospace;color:var(--tx2);border:1px solid var(--line);background:#0b1322;padding:6px 10px;border-radius:999px}
+  .badge b{color:var(--indigo)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px;margin-top:20px}
+  .kpi{border:1px solid var(--line);background:#0e1728;border-radius:12px;padding:14px 16px}
+  .kpi .v{font:700 23px/1.1 monospace}
+  .kpi .k{font-size:12px;color:var(--tx3);margin-top:6px}
+
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(258px,1fr))}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(205px,1fr))}
+  .card{border:1px solid var(--line);background:var(--panel);border-radius:13px;padding:16px 18px}
+  .card .t{font-weight:650;font-size:14px;display:flex;align-items:center;gap:8px}
+  .card .d{color:var(--tx2);font-size:13px;margin-top:7px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--indigo);flex:0 0 auto}
+  .dot.c{background:var(--cyan)} .dot.g{background:var(--green)} .dot.a{background:var(--amber)} .dot.r{background:var(--red)} .dot.v{background:var(--violet)}
+
+  /* layer stack */
+  .layers{display:grid;gap:10px;margin-top:14px}
+  .layer{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+  .layer>.head{display:flex;align-items:center;gap:10px;padding:11px 16px;background:#0f1830;border-bottom:1px solid var(--line)}
+  .layer>.head .idx{font:700 11px/1 monospace;color:#060a13;padding:4px 7px;border-radius:5px;background:var(--tx3)}
+  .layer:nth-child(1)>.head .idx{background:var(--cyan)}
+  .layer:nth-child(2)>.head .idx{background:var(--indigo)}
+  .layer:nth-child(3)>.head .idx{background:var(--violet)}
+  .layer:nth-child(4)>.head .idx{background:var(--green)}
+  .layer:nth-child(5)>.head .idx{background:var(--amber)}
+  .layer>.head .nm{font-weight:650;font-size:14px}
+  .layer>.head .tag{margin-left:auto;font:600 11px/1 monospace;color:var(--tx3);border:1px solid var(--line);padding:4px 8px;border-radius:6px;white-space:nowrap}
+  .layer>.body{padding:13px 16px;display:grid;gap:9px;grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+  .slot{border:1px dashed #2a3b5a;border-radius:9px;padding:10px 12px;background:#0b1322}
+  .slot .h{font-weight:600;font-size:13px}
+  .slot .s{font-size:12px;color:var(--tx3);margin-top:4px;line-height:1.55}
+  .slot code{color:var(--cyan);font-size:11.5px}
+
+  /* flow */
+  .flow{display:flex;align-items:stretch;overflow-x:auto;padding:6px 0 10px}
+  .step{flex:0 0 auto;border:1px solid var(--line);background:var(--panel);border-radius:11px;padding:11px 13px;min-width:140px}
+  .step .k{font:700 10px/1 monospace;color:var(--tx3);letter-spacing:.5px}
+  .step .n{font-weight:650;font-size:13px;margin-top:5px}
+  .step .x{font-size:11.5px;color:var(--tx3);margin-top:4px;line-height:1.5}
+  .arrow{flex:0 0 auto;display:flex;align-items:center;color:#33456a;padding:0 6px;font-size:18px}
+  .step.i{border-color:#1c4560;background:#0c2030}
+  .step.v{border-color:#3a2f63;background:#161229}
+  .step.g{border-color:#1f5f45;background:#0d2521}
+  .step.a{border-color:#5f4a1c;background:#241d0e}
+  .step.r{border-color:#63283a;background:#27131a}
+
+  table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--tx3);font-weight:600;font-size:11.5px;letter-spacing:.6px;text-transform:uppercase}
+  tbody tr:hover{background:#0d1524}
+  td code{color:var(--cyan);font-size:12px}
+  pre{background:#060b14;border:1px solid var(--line);border-radius:11px;padding:14px 16px;overflow:auto;font-size:12.3px;line-height:1.62;color:#c7d5ea;margin:12px 0}
+  pre .cm{color:#55678a} pre .key{color:var(--cyan)} pre .str{color:var(--green)} pre .num{color:var(--amber)} pre .kw{color:var(--violet)}
+
+  .pill{display:inline-block;font:600 11px/1 monospace;padding:3px 7px;border-radius:5px;border:1px solid;white-space:nowrap}
+  .pill.new{color:var(--green);border-color:#1f5f45;background:#0d2521}
+  .pill.core{color:var(--indigo);border-color:#31406b;background:#141d33}
+  .pill.auto{color:var(--cyan);border-color:#1c4560;background:#0c2030}
+  .pill.man{color:var(--amber);border-color:#5f4a1c;background:#241d0e}
+  .pill.dead{color:var(--red);border-color:#63283a;background:#27131a}
+
+  .note{border-left:3px solid var(--indigo);background:#0f1830;padding:11px 15px;border-radius:0 9px 9px 0;margin:14px 0;font-size:13px;color:var(--tx2)}
+  .note.warn{border-color:var(--amber);background:#221c0e}
+  .note.bad{border-color:var(--red);background:#241218}
+  .note.good{border-color:var(--green);background:#0d2320}
+  .note b{color:var(--tx)}
+  ul{margin:8px 0 8px 20px;color:var(--tx2);font-size:13.5px}
+  li{margin:5px 0}
+  li code{color:var(--cyan)}
+  details{border:1px solid var(--line);border-radius:11px;background:var(--panel);margin:12px 0;overflow:hidden}
+  details>summary{cursor:pointer;padding:11px 16px;font-size:13px;font-weight:600;color:var(--tx2);background:#0f1830;list-style:none}
+  details>summary::-webkit-details-marker{display:none}
+  details>summary:before{content:"▸ ";color:var(--indigo)}
+  details[open]>summary:before{content:"▾ "}
+  details .inner{padding:4px 16px 14px}
+  footer{margin-top:60px;padding-top:18px;border-top:1px solid var(--line);color:var(--tx3);font-size:12px;display:flex;flex-wrap:wrap;gap:16px}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px;font-size:12px;color:var(--tx3)}
+  .legend span{display:flex;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <h1>fastgpt-cli 0.2.0 · 架构 / 命令流程 / 数据链路</h1>
+    <p class="sub">
+      一个<strong>零依赖 Node CLI</strong>，用命令管理 FastGPT 全部资源：工作流 DSL 编译、知识库、权限、发布渠道、运行调试。
+      设计目标不是「人好用」，而是<strong>agent 可无人值守调用</strong>：所有输出是 JSON、每条错误自带下一步、撞死路就停。
+    </p>
+    <div class="badges">
+      <span class="badge">bin <b>fastgpt</b> · Node ≥18</span>
+      <span class="badge"><b>48</b> 命令 / 10 组</span>
+      <span class="badge"><b>8</b> 模块 · 4,589 行</span>
+      <span class="badge"><b>140</b> 离线断言</span>
+      <span class="badge">依赖 <b>0</b></span>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="v">1,975</div><div class="k">bin/fastgpt.mjs<br>命令分发 + handler</div></div>
+      <div class="kpi"><div class="v">7</div><div class="k">lib 模块<br>client/auth/errors/…</div></div>
+      <div class="kpi"><div class="v">27</div><div class="k">错误 subtype 注册<br>8 个 category</div></div>
+      <div class="kpi"><div class="v">16</div><div class="k">节点构造器<br>DSL → workflow</div></div>
+      <div class="kpi"><div class="v">16</div><div class="k">校验 issue code<br>auto / manual 分流</div></div>
+    </div>
+  </div>
+
+  <!-- 01 -->
+  <h2><span class="n">01</span>进程内分层</h2>
+  <p class="sub">不带服务器的 CLI：分层在<strong>同一进程</strong>里，靠「守卫层」把 agent 常见的错误路径提前掐掉。</p>
+
+  <div class="layers">
+    <div class="layer">
+      <div class="head"><span class="idx">L1</span><span class="nm">入口与分发</span><span class="tag">argv</span></div>
+      <div class="body">
+        <div class="slot"><div class="h">parseArgs</div><div class="s">自己写的极简解析：<code>-k v</code> / <code>--flag</code> / 位置参数；负数不当 flag</div></div>
+        <div class="slot"><div class="h">1~3 级命令匹配</div><div class="s"><code>app share create</code> → 依次试 3/2/1 级 key，命中即停</div></div>
+        <div class="slot"><div class="h">分组</div><div class="s">init · doctor · info · auth · model · app · wf · ds · perm · chat · apikey</div></div>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="head"><span class="idx">L2</span><span class="nm">前置守卫（agent 护栏）</span><span class="tag">guards</span></div>
+      <div class="body">
+        <div class="slot"><div class="h">离线命令白名单</div><div class="s">只有 <code>wf lint</code> / <code>wf validate</code> 不触网；<code>--dry-run</code> 仍然必须登录</div></div>
+        <div class="slot"><div class="h">阻断层 blocker</div><div class="s">撞死路（如团队无 modelId）写 <code>~/.fastgpt/blocked.json</code>，后续相关命令直接返回同一提示</div></div>
+        <div class="slot"><div class="h">401 自愈</div><div class="s">执行中途 401 → 重新 <code>ensureAuth</code> → 重试一次，失败才算失败</div></div>
+        <div class="slot"><div class="h">modelId 预检</div><div class="s"><code>wf build</code> 前扫团队已有应用，比对 24 位 ObjectId 是否真实存在</div></div>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="head"><span class="idx">L3</span><span class="nm">业务 handler</span><span class="tag">48 commands</span></div>
+      <div class="body">
+        <div class="slot"><div class="h">wf（7）</div><div class="s">build / lint / validate / get / publish / <b>versions</b> / <b>check-run</b></div></div>
+        <div class="slot"><div class="h">ds（17）</div><div class="s">知识库 / 集合 / 文档 / QA / 训练 / 检索 / 权限</div></div>
+        <div class="slot"><div class="h">app（7）· perm（6）</div><div class="s">应用 CRUD + 分享渠道；成员 / 团队 / 协作者权限</div></div>
+        <div class="slot"><div class="h">其余</div><div class="s">auth 4 · model 2 · init/doctor/info · chat run · apikey</div></div>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="head"><span class="idx">L4</span><span class="nm">HTTP 客户端</span><span class="tag">lib/client.mjs</span></div>
+      <div class="body">
+        <div class="slot"><div class="h">鉴权</div><div class="s">cookie 罐 <code>~/.fastgpt/cookies.json</code>；每次调用拼 <code>Cookie</code> 头</div></div>
+        <div class="slot"><div class="h">CSRF</div><div class="s">所有请求强制带 <code>fastgpt-web-request: fastgpt</code>，漏了就 403</div></div>
+        <div class="slot"><div class="h">错误归一</div><div class="s"><code>code!==200</code> → <code>FastGPTError</code>，i18n 错误码翻中文，推断 subtype</div></div>
+        <div class="slot"><div class="h">方法约定</div><div class="s">DELETE 自动把 body 转 query（FastGPT 不解析 DELETE body）；<code>upload()</code> 手搓 multipart 解决中文文件名</div></div>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="head"><span class="idx">L5</span><span class="nm">输出层</span><span class="tag">envelope + exit code</span></div>
+      <div class="body">
+        <div class="slot"><div class="h">统一 out()</div><div class="s">成功 <code>{ok:true, …, _notice?}</code>；失败 <code>{ok:false, error:{…}}</code>，永远 JSON</div></div>
+        <div class="slot"><div class="h">退出码</div><div class="s">按 category 映射，脚本/agent 可分支</div></div>
+        <div class="slot"><div class="h">本地状态</div><div class="s"><code>config.json</code>（base）· <code>cookies.json</code> · <code>blocked.json</code>，全 600</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 02 -->
+  <h2><span class="n">02</span>一次命令的生命周期</h2>
+  <p class="sub">从 argv 到 exit code，中途有 3 个可能提前返回的岔口（阻断、鉴权失败、校验失败）。</p>
+
+  <div class="flow">
+    <div class="step i"><div class="k">argv</div><div class="n">fastgpt wf build x.json</div><div class="x">process.argv.slice(2)</div></div>
+    <div class="arrow">→</div>
+    <div class="step i"><div class="k">parse</div><div class="n">parseArgs</div><div class="x">pos[] + flags{}</div></div>
+    <div class="arrow">→</div>
+    <div class="step i"><div class="k">dispatch</div><div class="n">命令匹配</div><div class="x">3→2→1 级；未知命令 → help + exit 1</div></div>
+    <div class="arrow">→</div>
+    <div class="step a"><div class="k">GUARD</div><div class="n">阻断层检查</div><div class="x">blocked.json 存在 → 直接返回，换命令也没用</div></div>
+    <div class="arrow">→</div>
+    <div class="step a"><div class="k">GUARD</div><div class="n">ensureAuth</div><div class="x">无 cookie → 登录引导；401 → 重登后重试一次</div></div>
+    <div class="arrow">→</div>
+    <div class="step v"><div class="k">HANDLER</div><div class="n">业务逻辑</div><div class="x">DSL 构建 / 参数校验 / API 编排</div></div>
+    <div class="arrow">→</div>
+    <div class="step r"><div class="k">GUARD</div><div class="n">modelId 预检</div><div class="x">wf build 专用：比对团队真实 modelId</div></div>
+    <div class="arrow">→</div>
+    <div class="step i"><div class="k">HTTP</div><div class="n">client.req</div><div class="x">CSRF 头 + Cookie → FastGPT API</div></div>
+    <div class="arrow">→</div>
+    <div class="step g"><div class="k">OUT</div><div class="n">envelope</div><div class="x">out(json) + exit code</div></div>
+  </div>
+
+  <div class="grid g3" style="margin-top:6px">
+    <div class="card"><div class="t"><span class="dot a"></span>岔口 1 · 阻断</div><div class="d">死路已记录：返回 <code>blocked:true</code> + 同一提示。设计意图是<strong>剥夺 agent「再试一次」的空间</strong>。</div></div>
+    <div class="card"><div class="t"><span class="dot a"></span>岔口 2 · 鉴权</div><div class="d">401 不直接失败，先重登再重试一次；仍失败才 exit 11。</div></div>
+    <div class="card"><div class="t"><span class="dot r"></span>岔口 3 · 校验</div><div class="d">结构/契约校验不通过 → <code>workflow_validate_failed</code>，带 <code>hint</code> + <code>issues[]</code>，exit 2。</div></div>
+  </div>
+
+  <!-- 03 -->
+  <h2><span class="n">03</span>模块依赖</h2>
+  <p class="sub">单向依赖，无循环；<code>lib/</code> 不 import <code>bin/</code>，所以每个模块都能被测试单独加载。</p>
+
+<pre><span class="cm">// 依赖方向（→ = imports）</span>
+bin/fastgpt.mjs
+  ├→ lib/client.mjs        <span class="cm">鉴权 / CSRF / 错误归一 / upload</span>
+  │     └→ lib/errors.mjs  <span class="cm">CliError + REGISTRY + Notice + exitCodeFor</span>
+  ├→ lib/auth.mjs           <span class="cm">三种登录：密码 / 扫码 / token 校验</span>
+  │     └→ lib/client.mjs
+  ├→ lib/blocker.mjs        <span class="cm">强制停止层（blocked.json）</span>
+  │     └→ lib/client.mjs   <span class="cm">复用 HOME</span>
+  ├→ lib/nodes.mjs          <span class="cm">16 个节点构造器 + VARP + REF</span>
+  ├→ lib/validate.mjs       <span class="cm">edge/chain · normalizeWorkflow · validateWorkflow</span>
+  ├→ lib/collaborators.mjs  <span class="cm">权限「完整列表语义」+ 4 类资源</span>
+  └→ lib/errors.mjs
+
+tests/smoke.mjs → nodes / validate / errors / blocker / collaborators   <span class="cm">// 不 import client（离线）</span></pre>
+
+  <!-- 04 -->
+  <h2><span class="n">04</span>命令矩阵</h2>
+  <p class="sub">48 条，按平台对象分组。<span class="pill new">v0.2.0 新增</span> 是这轮为「前端不认但服务端能跑」补的能力。</p>
+
+  <table>
+    <thead><tr><th style="width:88px">组</th><th style="width:44px">数</th><th>命令</th><th style="width:270px">平台端点族</th></tr></thead>
+    <tbody>
+      <tr><td><code>wf</code></td><td>7</td><td>build · lint <span class="pill new">--fix</span> · validate · get · publish · <b>versions</b> <span class="pill new">new</span> · <b>check-run</b> <span class="pill new">new</span></td><td><code>/api/core/app/version/*</code>、<code>/api/v1/chat/completions</code></td></tr>
+      <tr><td><code>ds</code></td><td>17</td><td>list · create · detail · permission · add-file · add-text · add-link · add-batch · add-qa · collections · data · training · retrain · search · del · delete · perm</td><td><code>/api/core/dataset/*</code>、<code>/api/proApi/core/dataset/*</code></td></tr>
+      <tr><td><code>app</code></td><td>7</td><td>list · create · delete · detail · share create / list / delete</td><td><code>/api/core/app/*</code>、<code>/api/support/outLink/*</code></td></tr>
+      <tr><td><code>perm</code></td><td>6</td><td>dataset · collection · app · member · team · invite</td><td><code>/api/proApi/support/user/team/*</code>、<code>…/collaborator/*</code></td></tr>
+      <tr><td><code>auth</code></td><td>4</td><td>login · scan · whoami · logout</td><td><code>/api/support/user/account/*</code></td></tr>
+      <tr><td><code>model</code></td><td>2</td><td>list · id（从已有应用提取真实 modelId）</td><td><code>/api/core/ai/model/*</code></td></tr>
+      <tr><td><code>init / doctor / info</code></td><td>3</td><td>配置引导 · 环境自检 · 能力快照</td><td><code>/api/common/system/getInitData</code>、<code>…/plan/getTeamPlanStatus</code></td></tr>
+      <tr><td><code>chat</code></td><td>1</td><td>run --appId -q --detail（解析 SSE）</td><td><code>/api/v1/chat/completions</code></td></tr>
+      <tr><td><code>apikey</code></td><td>1</td><td>create → 写 <code>./.fastgpt/apikey</code></td><td><code>/api/support/openapi/create</code></td></tr>
+    </tbody>
+  </table>
+
+  <!-- 05 -->
+  <h2><span class="n">05</span>输出契约（agent 的读接口）</h2>
+  <div class="grid g2">
+    <div class="card">
+      <div class="t"><span class="dot g"></span>成功</div>
+<pre>{
+  <span class="key">"ok"</span>: <span class="num">true</span>,
+  <span class="key">"appId"</span>: <span class="str">"6ae0…"</span>,
+  <span class="key" style="color:var(--violet)">"_notice"</span>: {           <span class="cm">// 成功也提示下一步</span>
+    <span class="key">"type"</span>: <span class="str">"dry_run_verified"</span>,
+    <span class="key">"message"</span>: <span class="str">"结构合法且 ID 已验证，但尚未写入"</span>,
+    <span class="key">"hint"</span>: <span class="str">"下一步：去掉 --dry-run…"</span>,
+    <span class="key">"forbidden"</span>: <span class="str">"不要把 dry-run 通过当作交付"</span>
+  }
+}</pre>
+      <div class="d">10 种 <code>_notice</code>：app_created / dry_run_verified / training_async / empty_result / empty_answer / plugin_published / not_published / collection_permission_disabled / low_quota / unregistered_error</div>
+    </div>
+    <div class="card">
+      <div class="t"><span class="dot r"></span>失败</div>
+<pre>{
+  <span class="key">"ok"</span>: <span class="num">false</span>,
+  <span class="key">"error"</span>: {
+    <span class="key">"type"</span>: <span class="str">"validation"</span>,
+    <span class="key">"subtype"</span>: <span class="str">"workflow_validate_failed"</span>,
+    <span class="key">"message"</span>: <span class="str">"工作流校验未通过"</span>,
+    <span class="key">"hint"</span>: <span class="str">"先跑 wf lint --fix …"</span>,   <span class="cm">// 下一步动作</span>
+    <span class="key">"action_required"</span>: <span class="str">"self"</span>,            <span class="cm">// self|user|none</span>
+    <span class="key">"dead_end"</span>: <span class="num">true</span>,                    <span class="cm">// 这条路没替代</span>
+    <span class="key">"must_end_turn"</span>: <span class="num">true</span>,                <span class="cm">// 立即停</span>
+    <span class="key">"forbidden"</span>: <span class="str">"不要绕过校验"</span>,          <span class="cm">// 禁令</span>
+    <span class="key">"next_command"</span>: <span class="str">"fastgpt wf lint …"</span>,
+    <span class="key">"details"</span>: { <span class="key">"issues"</span>: [ … ] }        <span class="cm">// 结构化诊断</span>
+  }
+}</pre>
+    </div>
+  </div>
+
+  <h3>退出码按 category 映射</h3>
+  <table>
+    <thead><tr><th style="width:120px">category</th><th style="width:80px">退出码</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>usage</code></td><td>1</td><td>命令用错、参数缺失</td></tr>
+      <tr><td><code>validation</code></td><td>2</td><td>结构 / 契约校验失败</td></tr>
+      <tr><td><code>config</code></td><td>10</td><td>没 init、地址未知</td></tr>
+      <tr><td><code>auth</code></td><td>11</td><td>未登录 / 登录失效</td></tr>
+      <tr><td><code>permission</code></td><td>12</td><td>权限不足</td></tr>
+      <tr><td><code>resource</code></td><td>13</td><td>资源不存在</td></tr>
+      <tr><td><code>platform</code></td><td>14</td><td>FastGPT 平台限制（不是使用者的错）</td></tr>
+      <tr><td><code>network</code></td><td>15</td><td>网络不可达</td></tr>
+    </tbody>
+  </table>
+
+  <!-- 06 -->
+  <h2><span class="n">06</span>「错误即操作手册」机制</h2>
+  <p class="sub">27 个错误 subtype 集中在注册表里，调用点只给 subtype + 动态数据。这样修一次文案，所有地方同步。</p>
+
+  <div class="grid g2">
+    <div class="card">
+      <div class="t"><span class="dot v"></span>四个语义字段</div>
+      <div class="d">
+        <ul>
+          <li><code>action_required</code>：<code>self</code>（自己能解决）/ <code>user</code>（必须问人）/ <code>none</code>（无能为力）</li>
+          <li><code>dead_end</code>：这条路没有替代走法，不是可重试的失败</li>
+          <li><code>must_end_turn</code>：立即结束本轮，别试别的命令</li>
+          <li><code>forbidden</code>：列出「看起来能绕过但其实没用」的做法</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card">
+      <div class="t"><span class="dot r"></span>死路状态机</div>
+      <div class="d">
+<pre style="margin:8px 0">撞 dead_end
+   ↓ setBlock(blocked.json)
+任何相关命令 → { blocked:true }
+   ↓ 用户补齐条件
+fastgpt model id 成功
+   ↓ clearBlock()
+恢复正常<span class="cm">（24h 自动失效兜底）</span></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="note good">
+    <b>信息分层（v0.2.0 定下的规则）：</b>
+    决定「下一步动作」→ <code>hint</code>（必须到命令级）；
+    「这个错怎么改」→ <code>details.issues[].code</code> + <code>fix</code> 标记；
+    「禁止做什么」→ <code>forbidden</code> + SKILL 红线；
+    「为什么 / 怎么排查」→ README + tests。<b>只写在文档里 = 大概率没被读。</b>
+  </div>
+
+  <!-- 07 -->
+  <h2><span class="n">07</span>认证数据链路</h2>
+  <div class="flow">
+    <div class="step i"><div class="k">STEP 1</div><div class="n">preLogin</div><div class="x">GET …/preLogin?username= → 一次性 code（不是图形验证码）</div></div>
+    <div class="arrow">→</div>
+    <div class="step i"><div class="k">STEP 2</div><div class="n">loginByPassword</div><div class="x">POST，密码先做无盐 SHA-256</div></div>
+    <div class="arrow">→</div>
+    <div class="step v"><div class="k">STEP 3</div><div class="n">取 token</div><div class="x">Node fetch 读不到 Set-Cookie → 用 getSetCookie() 手动抠 fastgpt_token</div></div>
+    <div class="arrow">→</div>
+    <div class="step g"><div class="k">STEP 4</div><div class="n">落盘</div><div class="x">~/.fastgpt/cookies.json，600</div></div>
+    <div class="arrow">→</div>
+    <div class="step i"><div class="k">STEP 5</div><div class="n">每次请求</div><div class="x">Cookie + fastgpt-web-request:fastgpt（CSRF）</div></div>
+  </div>
+  <p style="font-size:12.5px;color:var(--tx3)">
+    另有两条路：<code>auth scan</code>（走 Chrome 扫码，两轮 sessionId 确认）和 <code>whoami</code>（tokenLogin 校验当前态）。
+  </p>
+
+  <!-- 08 -->
+  <h2><span class="n">08</span>工作流编译链（DSL → 平台）</h2>
+  <p class="sub">手写 <code>nodes/edges</code> JSON 必踩 8 类 API 陷阱，所以 CLI 只让你写业务语义，编译、校验、规范化全在本地完成。</p>
+
+  <div class="flow">
+    <div class="step i"><div class="k">INPUT</div><div class="n">DSL 或原生导出</div><div class="x">{appId, nodes:[{type,id,…}], edges:[[s,t,key]]}<br>或 FastGPT 原生 nodes/edges/chatConfig</div></div>
+    <div class="arrow">→</div>
+    <div class="step v"><div class="k">COMPILE</div><div class="n">buildFromDsl</div><div class="x">16 个构造器补全字段、算 handle、推 selectedType、生成布局</div></div>
+    <div class="arrow">→</div>
+    <div class="step a"><div class="k">NORMALIZE</div><div class="n">normalizeWorkflow</div><div class="x">handle 形态 / 裸变量 / null 动态输入 / ifElse 值类型</div></div>
+    <div class="arrow">→</div>
+    <div class="step a"><div class="k">VALIDATE</div><div class="n">validateWorkflow</div><div class="x">15 条规则 → errors + issues[{code,fix}]</div></div>
+    <div class="arrow">→</div>
+    <div class="step r"><div class="k">PRE-CHECK</div><div class="n">modelId / datasetId</div><div class="x">对当前团队验证真实性（需登录）</div></div>
+    <div class="arrow">→</div>
+    <div class="step g"><div class="k">PUBLISH</div><div class="n">version/publish</div><div class="x">appId 放 query，isPublish 决定草稿/发布</div></div>
+  </div>
+
+  <h3>校验规则清单（16 个 issue code，按可修复性分两类）</h3>
+  <table>
+    <thead><tr><th style="width:110px">类别</th><th style="width:110px">fix</th><th>code</th></tr></thead>
+    <tbody>
+      <tr><td>图结构</td><td><span class="pill auto">auto</span></td><td><code>handle_legacy_port</code> · <code>handle_target</code> · <code>handle_format</code></td></tr>
+      <tr><td>图结构</td><td><span class="pill man">manual</span></td><td><code>handle_branch</code>（分支 key 不在分支列表）</td></tr>
+      <tr><td>引用语义</td><td><span class="pill auto">auto</span></td><td><code>ref_selected_type</code>（值是引用但 selectedType 不是 reference）</td></tr>
+      <tr><td>引用语义</td><td><span class="pill man">manual</span></td><td><code>var_undefined</code> · <code>ref_node</code> · <code>ref_output</code></td></tr>
+      <tr><td>渲染契约</td><td><span class="pill auto">auto</span></td><td><code>bare_variable_ref</code> · <code>addinputparam_null</code> · <code>ifelse_value_type</code> · <code>ifelse_valuetype_enum</code></td></tr>
+      <tr><td>渲染契约</td><td><span class="pill man">manual</span></td><td><code>bare_variable_undefined</code> · <code>canedit_const_value</code></td></tr>
+      <tr><td>平台约束</td><td><span class="pill man">manual</span></td><td><code>modelId</code> 非 ObjectId（warning）· answer 重复引用 · 孤立节点（warning）</td></tr>
+    </tbody>
+  </table>
+
+  <details>
+    <summary>为什么必须有 normalize 这一步（而不是「更严格的报错」）</summary>
+    <div class="inner">
+      <p>导出文件是<strong>跨版本产物</strong>：handle 按输出 key 命名、变量裸写 <code>{{key}}</code>、<code>canEdit</code> 输入存常量、ifElse 条件值存 boolean —— 这些在新版本里语义都变了，但服务端运行时仍然兼容。
+        所以旧文件「能跑，长得不对」。纯报错只会逼人绕过校验；<strong>规范化器</strong>才是正解：能修的修，修不掉的（需要人决定怎么改内容）才报 error。</p>
+      <p>这也是 v0.2.0 把校验器从<strong>黑名单</strong>（只认构造器产出形态）改成<strong>白名单 + 平台语义</strong>（<code>VARIABLE_NODE_ID</code> 是合法伪节点、ifElse 分支与 catch 边都合法）的原因。</p>
+    </div>
+  </details>
+
+  <!-- 09 -->
+  <h2><span class="n">09</span>本地状态与文件</h2>
+  <div class="grid g3">
+    <div class="card"><div class="t"><span class="dot c"></span><code>~/.fastgpt/config.json</code></div><div class="d">服务地址。优先级：<code>FASTGPT_BASE</code> 环境变量 &gt; 配置文件。600 权限。</div></div>
+    <div class="card"><div class="t"><span class="dot c"></span><code>~/.fastgpt/cookies.json</code></div><div class="d">会话 token（<code>fastgpt_token</code>）。600 权限。<code>auth logout</code> 删此文件。</div></div>
+    <div class="card"><div class="t"><span class="dot r"></span><code>~/.fastgpt/blocked.json</code></div><div class="d">死路阻断状态。<code>model id</code> 成功后自动清除，24h 兜底失效。</div></div>
+    <div class="card"><div class="t"><span class="dot g"></span><code>./.fastgpt/apikey</code></div><div class="d">OpenAPI key，<code>apikey create</code> 时写入当前目录。项目 <code>.gitignore</code> 要盖住。</div></div>
+  </div>
+  <p style="font-size:12.5px;color:var(--tx3)">环境变量：<code>FASTGPT_HOME</code>（多实例隔离）· <code>FASTGPT_BASE</code> · <code>FASTGPT_APP_KEY</code> · <code>CHROME_PATH</code>（扫码登录）</p>
+
+  <!-- 10 -->
+  <h2><span class="n">10</span>质量与边界</h2>
+  <div class="grid g2">
+    <div class="card">
+      <div class="t"><span class="dot g"></span>140 项离线断言（不触网）</div>
+      <div class="d">
+        <ul>
+          <li>节点构造器：16 个存在性 + 关键字段</li>
+          <li>校验规则：本轮 6 类坑逐条回归（全局变量放行、未定义报错、裸变量、canEdit 常量、null、ifElse 值）</li>
+          <li>规范化：handle / 裸变量 / null 三连修复</li>
+          <li>错误契约：category → 退出码映射、Notice 结构</li>
+          <li>协作者权限：完整列表语义 / POST 方法 / idKey</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card">
+      <div class="t"><span class="dot a"></span>刻意不做的事</div>
+      <div class="d">
+        <ul>
+          <li><b>不做「离线也能 build」</b>：避免用占位 modelId 产出「看起来成功」的假象</li>
+          <li><b>不内置 CDP / 浏览器检测</b>：破坏零依赖，且属验收手段而非平台契约</li>
+          <li><b>不自动改内容级问题</b>：<code>canedit_const_value</code> 要人决定内联还是保留</li>
+          <li><b>不猜地址/凭证</b>：缺 <code>FASTGPT_BASE</code> 就报 <code>not_configured</code> 并给 4 个预设</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="note warn">
+    <b>已知局限（诚实记录）：</b>
+    校验器仍是「重写的一套规则」，没有直接吃平台 schema —— 平台再新增机制（新节点类型、新输入渲染类型）时，还是会有一次「误判 → 放行」的补丁周期。
+    长期方向是启动时拉 <code>feConfigs</code> + 节点模板，用真实 schema 校验 handle 与 inputs。
+  </div>
+
+  <footer>
+    <span>源码：<code>~/Dev/projects/fastgpt-cli</code>（v0.2.0，未 commit）</span>
+    <span>安装：<code>npm i -g github:SNKK2/fastgpt-cli</code></span>
+    <span>生成：2026-10-27</span>
+  </footer>
+</div>
+</body>
+</html>

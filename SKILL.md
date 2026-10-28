@@ -35,6 +35,37 @@ description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI �
 
 **看到 `dead_end` 就停下。** 不要读源码、不要改 CLI、不要换命令重试。
 
+### 🚨 红线三：前端不认的写法（服务端能跑，所以最难发现）
+
+这四类写法**运行时全绿、界面全错**，只靠跑通判断一定漏：
+
+| 写法 | 症状 | 正确做法 |
+|---|---|---|
+| 裸变量占位 `{{DatasetId}}` | UI 显示纯文本而非变量芯片，变量依赖/改名联动全失效 | 写 `{{$VARIABLE_NODE_ID.DatasetId$}}`，节点输出写 `{{$nodeId.outputKey$}}` |
+| `canEdit:true` 的输入存常量 | 进「自定义变量」表格只给引用选择器 → 空的「选择引用变量」+「存在未完成的输入变量配置」 | 常量内联进代码/节点参数后删掉该输入项；`canEdit` 本身不要删（运行时靠它解析引用） |
+| `system_addInputParam.value = null` | 动态输入表格按数组处理，渲染异常 | `[]` |
+| `ifElseList[].list[].value = true` | 「输入项 ifElseList 不符合字段结构约束」 | 布尔存字符串 `"true"` |
+
+`wf lint` 全会报，`wf build` 会先尝试自动修；`canedit_const_value` 这类要加 `--inline-consts` 才自动内联（默认关，属内容级修改）。对应字段：`issues[].code`（
+`bare_variable_ref` / `canedit_const_value` / `addinputparam_null` / `ifelse_value_type` / `handle_legacy_port`），
+`issues[].fix` 为 `auto` 的跑一次 `wf lint --fix` 就没了，`manual` 的必须改内容。
+
+发布前必须 `wf check-run` 再看一遍，因为**服务端兼容裸写法**，功能正常不代表界面正常。
+
+**判断信息该放哪**（写一次省很多次）：
+- 决定「下一步动作」→ 错误 envelope 的 `hint`（要到命令级，不要写"逐项修正"这种废话）
+- 「这个错具体怎么改」→ `details.issues[].message` + `fix` 标记，让 agent 按 code 分支
+- 「禁止做什么」→ `forbidden` 字段 + 本文件红线
+- 只写在文档里 = 大概率没被读，等于没有
+
+### 交付前的唯一入口：`wf verify`
+
+```
+fastgpt wf verify <file> [--inline-consts] [--variables '{...}'] [--ui-cmd '...{appId}...'] [--appId <id>] [--keep]
+```
+默认影子应用，七步 lint→validate→deploy→diff→run→ui→cleanup，任一步失败即停并带 `failedAt` + `hint`。
+**不要再手工拼 lint/build/diff/check-run**——顺序（尤其 UI 后要重跑 diff）已经固化在里面。
+
 ### 强制停止层
 
 撞上 dead_end 后，CLI 会在本地写一个阻断状态。后续 `wf build` / `wf publish` / `app create`

@@ -1,6 +1,6 @@
 {
   "name": "fastgpt-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "命令行管理 FastGPT：工作流 DSL 构建、知识库文档与 QA 导入、权限配置、发布渠道、运行调试",
   "type": "module",
   "bin": {
