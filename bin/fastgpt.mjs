@@ -363,6 +363,47 @@ async function deployWorkflow({ appId, nodes, edges, chatConfig, versionName, pu
   return { appId };
 }
 
+/**
+ * 工具参数契约：pluginModule 必须声明工具需要的参数，否则 agent 传参永远是空。
+ * 这个坑很隐蔽——工具照常被调用、返回空结果，看不出是参数没传进去。
+ * 只能在在线阶段查（要拉工具详情拿 pluginInput 的 params）。
+ */
+async function checkToolContracts(nodes) {
+  const problems = [];
+  for (const n of nodes) {
+    if (n.flowNodeType !== 'pluginModule') continue;
+    const appId = n.pluginId || n.appId;
+    if (!appId) continue;
+    const d = await client.get(`/api/core/app/detail?appId=${appId}`).catch(() => null);
+    if (!d) { problems.push({ node: n.nodeId, tool: appId, severity: 'error', issue: '工具不存在或当前账号无权限' }); continue; }
+
+    const pin = (d.nodes || []).find(x => x.flowNodeType === 'pluginInput');
+    const need = ((pin && pin.inputs) || [])
+      .filter(i => i.key !== 'system_forbid_stream')
+      .map(i => ({ key: i.key, required: !!i.required }));
+    if (!need.length) continue;
+
+    const have = new Set((n.inputs || []).map(i => i.key));
+    const missing = need.filter(x => !have.has(x.key));
+    const missingRequired = missing.filter(x => x.required);
+
+    if (have.size === 0 || missing.length === need.length) {
+      problems.push({
+        node: n.nodeId, tool: d.name, severity: 'error',
+        issue: `pluginModule 一个参数都没声明，agent 调用时传参全是空对象，工具会「正常返回空结果」`,
+        fix: `给该 pluginModule 补 params：${need.map(x => x.key).join(', ')}`
+      });
+    } else if (missingRequired.length) {
+      problems.push({
+        node: n.nodeId, tool: d.name, severity: 'warning',
+        issue: `缺少工具需要的必填参数：${missingRequired.map(x => x.key).join(', ')}`,
+        fix: `补上这些 key，agent 才能传值`
+      });
+    }
+  }
+  return problems;
+}
+
 /** dry-run 的 ID 真实性检查：datasetId 必须存在于当前团队 */
 async function verifyResourceIds(nodes) {
   const dsIds = new Set();
@@ -1274,6 +1315,18 @@ const commands = {
       });
     }
 
+    const toolProblems = await checkToolContracts(nodes);
+    const toolErrors = toolProblems.filter(p => p.severity === 'error');
+    if (toolErrors.length) {
+      out({
+        ok: false, error: '工具参数契约不满足',
+        hint: toolErrors[0].fix,
+        details: { problems: toolProblems },
+        next_command: `fastgpt wf build ${file}（补完 params 后重试）`
+      });
+      process.exit(2);
+    }
+
     const ids = await verifyResourceIds(nodes);
     if (ids.invalid.length) {
       failCli('dataset_not_found', {
@@ -1708,6 +1761,109 @@ const commands = {
             : `看详情：fastgpt app detail ${rows[0]._id}`)
         : `没搜到「${kw}」。试更短的关键词，或 fastgpt find "" --type plugin 列出全部工具`
     });
+  },
+
+  /**
+   * 从工具列表生成 agent 应用。
+   * 固化三件必做的事：tools 节点挂载、pluginModule 的 params 声明（否则 agent 传参全空）、
+   * selectedTools 边（否则工具挂不上）。
+   */
+  async 'agent new'(args, f) {
+    const name = f.name || args[0];
+    if (!name) fail('需要应用名', '用法：fastgpt agent new --name my_agent --tools <appId1>,<appId2> [--prompt "@p.txt"] [--deploy]', 'fastgpt agent new --name a --tools x,y');
+    const toolIds = String(f.tools || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (!toolIds.length) fail('需要 --tools', '用法：fastgpt agent new --name a --tools <appId1>,<appId2>', 'fastgpt find 多维表');
+
+    // 1) 拉每个工具的元信息：名字 + pluginInput 的 params（决定 pluginModule 要声明哪些参数）
+    const tools = [];
+    for (const id of toolIds) {
+      const d = await client.get(`/api/core/app/detail?appId=${id}`).catch(() => null);
+      if (!d) fail(`工具 ${id} 不存在或无权限`, '先 fastgpt find <关键词> 确认 appId', 'fastgpt find');
+      const pin = (d.nodes || []).find(x => x.flowNodeType === 'pluginInput');
+      const params = ((pin && pin.inputs) || [])
+        .filter(i => i.key !== 'system_forbid_stream')
+        .map(i => ({ key: i.key, label: i.label || i.key, valueType: i.valueType || 'string', required: !!i.required }));
+      // 工具的用途：优先取 pluginInput 里的说明，其次取 intro
+      const purpose = params.map(p => `${p.key}${p.required ? '(必填)' : ''}`).join(', ') || '无参数';
+      tools.push({ id, name: d.name, intro: d.intro || '', params, purpose });
+    }
+
+    // 2) modelId：优先 --model，否则从团队已有应用里提取一个真实的
+    let modelId = f.model;
+    if (!modelId) {
+      const found = await scanModelIds();
+      const first = Array.isArray(found) ? found[0] : found;
+      modelId = typeof first === 'string' ? first : first?.modelId;
+      if (modelId && typeof modelId === 'object') modelId = modelId.modelId;
+      if (!modelId) fail('拿不到可用 modelId', '先手动传 --model <24位ObjectId>，或确认团队里有应用配过模型', 'fastgpt model id');
+    }
+
+    // 3) prompt：给了就展开，否则按工具清单生成
+    let prompt = f.prompt
+      ? (String(f.prompt).startsWith('@') ? fs.readFileSync(String(f.prompt).slice(1), 'utf8') : String(f.prompt))
+      : [
+          `你是「${name}」助手。用户用自然语言提问，你自己决定调哪个工具、传什么参数，不要凭空编数据。`,
+          '',
+          '## 可用工具',
+          ...tools.map((t, i) => `${i + 1}. ${t.name} —— 参数：${t.purpose}${t.intro ? `；${t.intro}` : ''}`),
+          '',
+          '## 规则',
+          '- 只能调用「可用工具」里列出的工具，工具名必须一字不差；**不要发明工具名**（发明会导致 no valid tool calls）。',
+          '- 你只做「自然语言 → 工具参数」的翻译；过滤、聚合、计算都在工具里做，不要自己算。',
+          '- 参数名必须用工具声明的原样名字。',
+          '- 工具返回里带 note/summary 之类的口径信息，要写进回答。',
+          '- 先取元数据再取数据（如先看有哪些字段，再查）。',
+          '- 用户追问时沿用上一轮的参数，只改变化的部分。',
+          '- 有专门出图/渲染的工具时，拿到数据后必须调它，不要把数据直接以表格回复替代。',
+          '- 工具返回的可渲染代码块（echarts、mermaid 等）要原样放进最终回复，不要改写或省略。',
+          '- 工具返回空结果时先看它返回的 note / matchedRecords，确认真没数据再说「没有」，不要凭感觉。'
+        ].join('\n');
+
+    // 4) 组装：start → tools ──selectedTools──→ pluginModule*
+    const nodes = [
+      { type: 'start', id: 'start' },
+      { type: 'toolCall', id: 'tools', name: '工具调用', modelId, prompt, question: ['start', 'userChatInput'], history: Number(f.history) || 10 },
+      ...tools.map((t, i) => ({ type: 'pluginModule', id: `tool${i + 1}`, appId: t.id, name: t.name, params: t.params })),
+      { type: 'answer', id: 'answer', content: ['tools', 'answerText'] }
+    ];
+    const edges = [
+      ['start', 'tools'],
+      ['tools', 'answer'],
+      ...tools.map((t, i) => ({
+        source: 'tools', sourceHandle: 'selectedTools',
+        target: `tool${i + 1}`, targetHandle: 'selectedTools'
+      }))
+    ];
+
+    const outFile = f.out || `${name}.agent.json`;
+    const dsl = { versionName: 'agent-v1', nodes, edges };
+    fs.writeFileSync(outFile, JSON.stringify(dsl, null, 2));
+
+    let appId;
+    if (f.deploy) {
+      appId = await client.post('/api/core/app/create', { name, type: 'advanced', avatar: 'core/app/type/workflowFill', intro: f.intro || '' });
+      dsl.appId = appId;
+      fs.writeFileSync(outFile, JSON.stringify(dsl, null, 2));
+      const lint = lintWorkflow(outFile, {});
+      if (!lint.ok) failCli('workflow_validate_failed', { hint: lint.next, details: { errors: lint.errors, issues: lint.issues } });
+      const contracts = await checkToolContracts(lint.nodes);
+      const errs = contracts.filter(x => x.severity === 'error');
+      if (errs.length) failCli('workflow_validate_failed', { hint: errs[0].fix, details: { problems: contracts } });
+      await deployWorkflow({ appId, nodes: lint.nodes, edges: lint.edges, chatConfig: lint.chatConfig, versionName: 'agent-v1', publish: true });
+    }
+
+    out(withNotice({
+      ok: true, name, file: outFile, modelId,
+      tools: tools.map(t => ({ appId: t.id, name: t.name, params: t.params.map(p => p.key) })),
+      deployed: !!f.deploy, appId,
+      next: f.deploy
+        ? `试一句：fastgpt chat run --appId ${appId} -q "<用户会问的话>" --detail`
+        : `fastgpt wf build ${outFile}（文件里还没有 appId，先 fastgpt app create --name ${name} --type advanced）`
+    }, {
+      type: 'agent_scaffold',
+      message: 'agent 骨架已生成',
+      hint: 'pluginModule 的 params 已按工具真实入参自动填好；缺参数时工具会「正常返回空结果」，wf build 会拦这个'
+    }));
   },
 
   /**
@@ -2449,6 +2605,7 @@ const commands = {
         clean: ['clean [--confirm]  清理验证留下的空应用/影子应用'],
         find: ['find <关键词> [--type plugin|toolSet|advanced] [--limit 30]  跨目录搜应用/工具（list 只看根目录）'],
         tool: ['new --name <名字> [--params a,b,c] [--code body.js] [--deploy]  生成工具骨架（pluginInput→code→pluginOutput）'],
+        agent: ['list', 'create --name --type', 'new --name <名字> --tools <appId,appId> [--prompt "@p.txt"] [--deploy]  从工具生成 agent'],
         ds: [
           'permission <datasetId>                      查自己的读写/管理权限','list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
         perm: [
@@ -2524,6 +2681,18 @@ const commands = {
                    autoFixable: v.issues.filter(i => i.fix === 'auto').length,
                    manualFixRequired: v.issues.filter(i => i.fix !== 'auto').length }
       });
+    }
+
+    const toolProblems = await checkToolContracts(nodes);
+    const toolErrors = toolProblems.filter(p => p.severity === 'error');
+    if (toolErrors.length) {
+      out({
+        ok: false, error: '工具参数契约不满足',
+        hint: toolErrors[0].fix,
+        details: { problems: toolProblems },
+        next_command: `fastgpt wf build ${file}（补完 params 后重试）`
+      });
+      process.exit(2);
     }
 
     const ids = await verifyResourceIds(nodes);

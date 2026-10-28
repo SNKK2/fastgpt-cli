@@ -216,6 +216,23 @@ fastgpt tool new --name dt_query --params filters --code body.js --deploy
 | 内部变量与解构参数重名 | `Identifier 'groupBy' has already been declared` | 与 main 的解构参数重名，改内部变量名 |
 | 解构模式下还用 `input.xxx` | `input is not defined` | 直接用解构出来的变量名 |
 
+### 从工具生成 agent：`agent new`
+
+```bash
+fastgpt agent new --name chart_agent --tools <appId1>,<appId2>,<appId3> --deploy
+```
+
+自动做四件必做的事（每一件漏了都会「静默失败」）：
+
+| 做法 | 漏了会怎样 |
+|---|---|
+| 建 `tools` 节点并 `selectedTools` 连 pluginModule | 工具挂不上，agent 报 `no valid tool calls matched` |
+| **按工具真实入参填 pluginModule 的 params** | agent 传参永远是 `{}`，工具「正常返回空结果」，看不出错 |
+| 从团队已有应用提取真实 modelId | 发布时报 Model unavailable |
+| 按工具清单生成 prompt（列确切工具名 + 禁止发明工具名） | 模型臆造工具名 → `no valid tool calls` |
+
+`wf build` 会额外做**工具参数契约检查**：pluginModule 一个参数都没声明、或缺少工具必填参数时直接拦下。
+
 ### 提交 vs 落库：`wf diff`
 
 服务端保存时会跑 migration、补默认值、补异常边，**这些都不在响应里**。`wf diff` 读回对比，分五类输出：
