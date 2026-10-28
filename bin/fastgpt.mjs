@@ -29,6 +29,76 @@ const fail = (msg, extra = {}) => {
   process.exit(exitCodeFor(err));
 };
 
+
+// ---------- 命令文档：让 --help 能逐层下钻 ----------
+// agent 的第一反应就是 `xxx --help`；以前 `fastgpt wf --help` 直接报「未知命令: wf」。
+const COMMAND_DOC = {
+  'wf lint': {
+    usage: 'fastgpt wf lint <file> [--fix out.json] [--inline-consts]',
+    about: '离线体检：规范化 + 校验。不触网、不需要登录。',
+    flags: {
+      '--fix <out.json>': '把规范化结果写成文件，可直接喂 wf build',
+      '--inline-consts': '把 canEdit 动态输入里的常量内联进代码（内容级修改，默认关）'
+    },
+    output: 'ok / autoFixed[] / issues[{code,fix}] / next',
+    examples: ['fastgpt wf lint wf.json --fix fixed.json --inline-consts']
+  },
+  'wf build': {
+    usage: 'fastgpt wf build <file> [--dry-run] [--no-inline-consts] [--appId <id>]',
+    about: '规范化 + 校验 + 提交发布。默认会自动内联 canEdit 常量。',
+    flags: {
+      '--dry-run': '只校验不写库（仍然需要登录，因为要验证 modelId/datasetId 真实性）',
+      '--no-inline-consts': '关闭 canEdit 常量自动内联',
+      '--appId <id>': '文件里没有 appId 时用它'
+    },
+    output: 'ok / appId / nodes / edges / publish / warnings',
+    examples: ['fastgpt wf build fixed.json --dry-run']
+  },
+  'wf verify': {
+    usage: 'fastgpt wf verify <file> [--appId <id>] [--inline-consts] [--variables \'{...}\'] [--ui-cmd \'<cmd {appId}>\'] [--keep]',
+    about: '一条龙：lint → 校验 → 部署 → diff → 运行时 → (UI) → 清理。默认在影子应用上跑，跑完即删。',
+    flags: {
+      '--appId <id>': '对指定应用跑（会写入），不给则建影子应用',
+      '--inline-consts': '同 lint',
+      '--variables <json>': '跑运行时用的入参',
+      '--ui-cmd <cmd>': '外挂前端校验命令，{appId} 会被替换',
+      '--keep': '保留影子应用便于排查'
+    },
+    output: 'verdict:all_passed | {ok:false, failedAt, hint, steps}',
+    examples: ['fastgpt wf verify wf.json --inline-consts --ui-cmd \'node scripts/check-ui.mjs {appId}\'']
+  },
+  'wf diff': {
+    usage: 'fastgpt wf diff <appId> <file>',
+    about: '提交 vs 落库分类对比：服务端 migration 改了/丢了什么。',
+    flags: {},
+    output: 'verdict: clean|server_normalized|data_loss + added/removed/injected/stripped/changed/whitelisted',
+    examples: ['fastgpt wf diff 6ae0... wf.json']
+  },
+  'wf check-run': {
+    usage: 'fastgpt wf check-run <appId> [-q <问题>] [--variables \'{...}\'] [--verbose]',
+    about: '真跑一次 OpenAPI，抓「变量没替换」。默认输出摘要，--verbose 才展开每个节点。',
+    flags: { '--variables <json>': '全局变量入参', '--verbose': '输出完整节点轨迹' },
+    output: 'ok / Status / domains / unresolvedVariables',
+    examples: ['fastgpt wf check-run 6ae0... --variables \'{"RequestId":"<uuid>"}\'']
+  },
+  'wf versions': { usage: 'fastgpt wf versions <appId>', about: '草稿 / version/latest / 各版本指纹对比。', flags: {}, output: 'rows[] / consistent', examples: [] },
+  'wf ruleset': { usage: 'fastgpt wf ruleset [--calibrate]', about: '目标实例版本 vs 内置规则集校准版本，报规则漂移。', flags: { '--calibrate': '输出重新校准步骤' }, output: 'compare.versionMatch / verdict', examples: [] },
+  start: {
+    usage: 'fastgpt start',
+    about: '根据当前环境与目录状态，告诉你「下一步该敲哪一条命令」。',
+    flags: {},
+    output: 'next_command / why / context',
+    examples: ['fastgpt start']
+  },
+  clean: {
+    usage: 'fastgpt clean [--confirm]',
+    about: '清理验证过程留下的空应用/影子应用（cli-verify-*、cli-probe-* 等）。',
+    flags: { '--confirm': '真正删除；不给只列出' },
+    output: 'candidates[] / deleted[]',
+    examples: ['fastgpt clean', 'fastgpt clean --confirm']
+  }
+};
+
 // ---------- 简易参数解析 ----------
 function parseArgs(argv) {
   const pos = [], flags = {};
@@ -354,6 +424,25 @@ async function runWorkflowOnce({ appId, key, variables, question = 'hello', chat
     unresolvedVariables: unresolved,
     trace: trace.filter(t => t.type === 'httpRequest468' || t.body || t.headers)
   };
+}
+
+
+// ---------- 本地状态账本：让 agent 不用自己记「我到哪一步了」 ----------
+const STATE_PATH = path.join(HOME, 'state.json');
+function readState() {
+  try { return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')); } catch { return {}; }
+}
+function writeState(patch) {
+  try {
+    const next = { ...readState(), ...patch, updatedAt: new Date().toISOString() };
+    fs.writeFileSync(STATE_PATH, JSON.stringify(next, null, 2), { mode: 0o600 });
+  } catch {}
+}
+function trackShadow(appId, action) {
+  const st = readState();
+  const list = new Set(st.shadowApps || []);
+  if (action === 'add') list.add(appId); else list.delete(appId);
+  writeState({ shadowApps: [...list] });
 }
 
 // ---------- DSL 构建（wf build / wf validate 共用） ----------
@@ -1135,7 +1224,8 @@ const commands = {
   async 'wf build'(args, f) {
     const file = f.file || args[0];
     if (!file) fail('需要 DSL 文件路径');
-    const wf = loadWorkflow(file, f);
+    // 默认内联 canEdit 常量：lint 修过的东西 build 不该再拦一次（--no-inline-consts 关闭）
+    const wf = loadWorkflow(file, { ...f, 'inline-consts': f['inline-consts'] !== false });
     const appId = wf.raw.appId || f.appId;
     if (!appId) fail('DSL 需要 appId');
 
@@ -1338,28 +1428,38 @@ const commands = {
     const steps = [];
     const t0 = Date.now();
     const push = (step, ok, detail = {}) => steps.push({ step, ok, ms: Date.now() - t0, ...detail });
-    const stop = (step, hint, details) => {
+
+    // 目标与清理必须先于 stop 定义：process.exit 会跳过 finally，失败路径必须自己清理
+    const mode = f.appId ? 'app' : 'shadow';
+    let appId = f.appId;
+    let shadowCreated = false;
+    const cleanupShadow = async () => {
+      if (mode !== 'shadow' || f.keep === true || !shadowCreated || !appId) return;
+      try { await client.del(`/api/core/app/del?appId=${appId}`); trackShadow(appId, 'remove'); shadowCreated = false; } catch {}
+    };
+    const stop = async (step, hint, details) => {
+      await cleanupShadow();
       out({ ok: false, failedAt: step, file, steps, hint, ...(details ? { details } : {}),
             next: `修掉 ${step} 的问题后重跑 fastgpt wf verify ${file}` });
       process.exit(2);
     };
 
-    // ① 离线体检 + 规范化
-    const lint = lintWorkflow(file, f);
+    // ① 离线体检 + 规范化（默认内联 canEdit 常量）
+    const lint = lintWorkflow(file, { ...f, 'inline-consts': f['inline-consts'] !== false });
     push('lint', lint.ok, {
       nodes: lint.nodes.length, edges: lint.edges.length,
       autoFixed: lint.fixes.length, issues: lint.issues.length, manualFixRequired: lint.manualFixRequired
     });
-    if (!lint.ok) stop('lint', lint.next || '先修 lint 的 manual 项', { issues: lint.issues });
+    if (!lint.ok) await stop('lint', lint.next || '先修 lint 的 manual 项', { issues: lint.issues });
 
-    // ② 目标：默认影子应用（不碰生产）
-    const mode = f.appId ? 'app' : 'shadow';
-    let appId = f.appId;
+    // ② 建影子应用
     if (mode === 'shadow') {
       appId = await client.post('/api/core/app/create', {
         name: f.name || `cli-verify-${Date.now()}`, type: 'advanced',
         avatar: 'core/app/type/workflowFill', intro: ''
       });
+      shadowCreated = true;
+      trackShadow(appId, 'add');
     }
     push('target', true, { mode, appId });
 
@@ -1372,7 +1472,7 @@ const commands = {
       const ids = await verifyResourceIds(nodes);
       if (ids.invalid.length) {
         push('resource_ids', false, { invalid: ids.invalid });
-        stop('resource_ids', 'datasetId 不在当前团队：先 fastgpt ds list 确认', { invalidDatasetIds: ids.invalid });
+        await stop('resource_ids', 'datasetId 不在当前团队：先 fastgpt ds list 确认', { invalidDatasetIds: ids.invalid });
       }
       push('validate', true, { datasetIds: ids.checked, warnings: v.warnings.length });
 
@@ -1392,7 +1492,7 @@ const commands = {
                   stripped: diff.stripped.length, changed: diff.changed.length, whitelisted: diff.whitelistedCount }
       });
       if (diff.verdict === 'data_loss') {
-        stop('diff', '提交的内容有丢失（stripped/removed 非空），先合并回本地文件', { stripped: diff.stripped, removed: diff.removed });
+        await stop('diff', '提交的内容有丢失（stripped/removed 非空），先合并回本地文件', { stripped: diff.stripped, removed: diff.removed });
       }
 
       // ⑥ 运行时（没有 apikey 就跳过，不算失败）
@@ -1420,15 +1520,15 @@ const commands = {
           push('ui', true, { cmd, tail: String(stdout).trim().slice(-400) });
         } catch (e) {
           push('ui', false, { cmd, exit: e.status });
-          stop('ui', 'UI 校验未通过（前端仍有报错/裸变量/缺芯片）', { tail: String(e.stdout || e.stderr || '').trim().slice(-1500) });
+          await stop('ui', 'UI 校验未通过（前端仍有报错/裸变量/缺芯片）', { tail: String(e.stdout || e.stderr || '').trim().slice(-1500) });
         }
       }
     } finally {
-      if (mode === 'shadow' && f.keep !== true) {
-        try { await client.del(`/api/core/app/del?appId=${appId}`); push('cleanup', true, { appId }); }
-        catch (e) { push('cleanup', false, { appId, error: e.message }); }
-      } else if (mode === 'shadow') {
+      if (mode === 'shadow' && f.keep === true) {
         push('cleanup', true, { appId, kept: true });
+      } else if (mode === 'shadow') {
+        await cleanupShadow();
+        push('cleanup', !shadowCreated, { appId });
       }
     }
 
@@ -1488,6 +1588,108 @@ const commands = {
     }));
   },
 
+  /**
+   * 下一步该做什么：根据「配置 / 登录 / 目录里的工作流 / 上次状态」推一条可执行命令。
+   * 目标：用户或 agent 不用读文档，也不用问人，敲 `fastgpt start` 就知道下一步。
+   */
+  async 'start'(args, f) {
+    const st = readState();
+    const ctx = { base: getBase() || null, loggedIn: false, workflowFile: null, apikey: false, shadowApps: st.shadowApps || [] };
+
+    // 1) 地址
+    if (!ctx.base) {
+      out({ ok: true, next_command: 'fastgpt init --preset cn',
+            why: '还没配置 FastGPT 地址。国内 SaaS 用 --preset cn，自建/私有化用 --base <url>',
+            context: ctx });
+      return;
+    }
+
+    // 2) 登录
+    try { await client.get('/api/support/user/account/tokenLogin'); ctx.loggedIn = true; } catch {}
+    if (!ctx.loggedIn) {
+      out({ ok: true, next_command: 'fastgpt auth login',
+            why: `已配置 ${ctx.base}，但当前没有有效登录态`,
+            context: ctx });
+      return;
+    }
+
+    // 3) 目录里的工作流文件
+    const files = fs.readdirSync('.').filter(x => x.endsWith('.json') && !x.startsWith('.'));
+    for (const x of files) {
+      try {
+        const d = JSON.parse(fs.readFileSync(x, 'utf8'));
+        if (Array.isArray(d.nodes) && d.nodes.length) { ctx.workflowFile = x; break; }
+      } catch {}
+    }
+    ctx.apikey = fs.existsSync('.fastgpt/apikey');
+    if (!ctx.workflowFile) {
+      out({ ok: true, next_command: 'fastgpt app list',
+            why: '当前目录没有工作流 JSON。若是要改线上已有的，用 wf get <appId> 导出后再处理',
+            context: ctx });
+      return;
+    }
+
+    // 4) 在线体检（离线）→ 决定下一步
+    const r = lintWorkflow(ctx.workflowFile, { 'inline-consts': true });
+    ctx.lint = { ok: r.ok, autoFixable: r.autoFixable, manualFixRequired: r.manualFixRequired,
+                 codes: [...new Set(r.issues.map(i => i.code))] };
+
+    if (r.autoFixable > 0 || r.fixes.length > 0) {
+      out({ ok: true, next_command: `fastgpt wf lint ${ctx.workflowFile} --fix fixed.json --inline-consts`,
+            why: `${ctx.workflowFile} 有 ${r.fixes.length + r.autoFixable} 项可以自动修（连线形态/变量写法/常量内联…），先修再验`,
+            context: ctx });
+      return;
+    }
+    if (!r.ok) {
+      out({ ok: true, next_command: `fastgpt wf lint ${ctx.workflowFile}`,
+            why: `有 ${r.manualFixRequired} 项必须改内容（${ctx.lint.codes.join(', ')}），命令会给出逐条位置`,
+            context: ctx });
+      return;
+    }
+
+    // 5) 能跑一条龙了吗
+    if (!ctx.apikey) {
+      out({ ok: true, next_command: 'fastgpt apikey create --name cli',
+            why: '结构已就绪。运行时验证需要 OpenAPI key（会写到 ./.fastgpt/apikey）',
+            context: ctx });
+      return;
+    }
+    const vars = f.variables ? ` --variables '${f.variables}'` : '';
+    out({ ok: true,
+          next_command: `fastgpt wf verify ${ctx.workflowFile}${vars}`,
+          why: '结构通过、密钥就绪。verify 会建影子应用跑完整链路（含部署/diff/运行时），跑完自动删除',
+          context: { ...ctx, tip: '想连同前端画面一起验：追加 --ui-cmd \'node scripts/check-ui.mjs {appId}\'' },
+          ...(ctx.shadowApps.length ? { warn: `有 ${ctx.shadowApps.length} 个影子应用没清掉，跑 fastgpt clean 看清单` } : {}) });
+  },
+
+  /** 清理验证过程留下的空应用/影子应用 */
+  async 'clean'(args, f) {
+    const list = await client.post('/api/core/app/listV2', { parentId: null, searchKey: '' });
+    const apps = (list.list || list);
+    const orphanPattern = /^cli-(verify|probe|shadow)-/i;
+    const st = readState();
+    const tracked = new Set(st.shadowApps || []);
+    const candidates = [];
+    for (const a of apps) {
+      const named = orphanPattern.test(a.name);
+      const isTracked = tracked.has(a._id);
+      if (!named && !isTracked) continue;
+      const d = await client.get(`/api/core/app/detail?appId=${a._id}`).catch(() => ({}));
+      candidates.push({ appId: a._id, name: a.name, nodes: (d.nodes || []).length,
+                        tracked: isTracked, empty: (d.nodes || []).length === 0 });
+    }
+    if (f.confirm !== true) {
+      out({ ok: true, dryRun: true, count: candidates.length, candidates,
+            next: candidates.length ? '确认后加 --confirm 删除' : '没有需要清理的残留' });
+      return;
+    }
+    const deleted = [];
+    for (const c of candidates) {
+      try { await client.del(`/api/core/app/del?appId=${c.appId}`); deleted.push(c.appId); trackShadow(c.appId, 'remove'); } catch {}
+    }
+    out({ ok: true, deleted, remaining: candidates.length - deleted.length });
+  },
+
   /** 草稿 / 版本层一致性：判断「我改的东西到底写进哪一层了」 */
   async 'wf versions'(args, f) {
     const appId = f.appId || args[0];
@@ -1533,7 +1735,12 @@ const commands = {
     const r = await runWorkflowOnce({ appId, key, variables, question: f.q, chatId: f.chatId });
     if (r.httpStatus !== 200) fail(`对话接口返回 ${r.httpStatus}: ${r.error || ''}`);
 
-    out(withNotice({ appId, ...r }, r.ok ? null : {
+    const slim = {
+      ok: r.ok, appId, httpStatus: r.httpStatus, Status: r.Status, DataSetDate: r.DataSetDate,
+      domains: r.domains, unresolvedVariables: r.unresolvedVariables,
+      ...(f.verbose ? { trace: r.trace, contentLength: r.contentLength } : {})
+    };
+    out(withNotice(slim, r.ok ? null : {
       type: 'unresolved_variable',
       message: '运行时有变量没被替换，值里残留 {{...}}',
       hint: '检查该节点输入是否引用了未定义/未传值的全局变量；wf lint 能提前发现裸占位'
@@ -2077,27 +2284,55 @@ const commands = {
     out({ ok: true, apiKey: key });
   },
 
-  async help() {
+  /**
+   * help 支持三级：无参 → 全局；group → 该组命令；完整命令 → flags/示例/输出判据。
+   * agent 的第一反应是 `xxx --help`，所以这一层必须能用。
+   */
+  async help(args = []) {
+    const target = (args || []).filter(a => a !== 'help').join(' ');
+
+    // 完整命令（wf build）或组内命令（wf）
+    const docKey = Object.keys(COMMAND_DOC).find(k => k === target);
+    if (docKey) {
+      const d = COMMAND_DOC[docKey];
+      out({ usage: d.usage, about: d.about, flags: d.flags, output: d.output, examples: d.examples });
+      return;
+    }
+    // group：列出该组所有命令的 usage + about
+    const group = target.split(' ')[0];
+    const inGroup = Object.entries(COMMAND_DOC).filter(([k]) => k === group || k.startsWith(group + ' '));
+    if (inGroup.length) {
+      out({
+        group,
+        commands: inGroup.map(([k, d]) => ({ command: k, usage: d.usage, about: d.about })),
+        next: `看某一条的细节：fastgpt help ${inGroup[0][0]}`
+      });
+      return;
+    }
+
     out({
       usage: 'fastgpt <group> <cmd> [args] [flags]',
       groups: {
         init: ['首次使用运行：fastgpt init（配置地址 + 登录）'],
+        start: ['根据当前环境与目录状态，告诉你下一步该敲哪一条命令'],
         doctor: ['环境自检：检查地址/登录/模型/知识库是否就绪'],
         info: ['环境快照（人类可读）：用户/团队/配额/资源/能力', 'info --deep  含工作流与知识库明细', 'info --json  输出结构化数据（给 agent）'],
         auth: ['login [--user --pass]（无参数进入交互引导）', 'scan [--no-wait]（打开浏览器扫码）', 'scan --wait --session-id <id>（第二轮确认）', 'whoami', 'logout'],
         model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
         wf: [
-          'build <dsl.json|原生导出.json> [--dry-run]   需要登录；构建前自动规范化 handle/裸变量/null 动态输入',
-          'lint <file> [--fix out.json]   离线：语法 + 渲染契约检查；--fix 写出规范化结果，可直接喂 build',
-          'validate <json>                同 lint（含自动规范化报告 autoFixed）',
-          "verify <file> [--appId] [--ui-cmd]      一条龙：lint→校验→部署→diff→运行时→(UI)，默认影子应用跑完即删",
-          "check-run <appId> [-q] [--variables '{}'] 运行时体检：真跑一次，摊开每节点入参与未替换变量",
-          'versions <appId>               草稿 / version/latest / 各版本指纹对比（判断改动写进哪一层）',
+          'build <dsl.json|原生导出.json> [--dry-run]   需要登录；构建前自动规范化（含 canEdit 常量内联）',
+          'lint <file> [--fix out.json] [--inline-consts]  离线：语法 + 渲染契约检查',
+          'validate <json>                同 lint（别名）',
+          'verify <file> [--appId] [--ui-cmd]  一条龙：lint→校验→部署→diff→运行时→(UI)，默认影子应用跑完即删',
           'diff <appId> <file>            提交 vs 落库分类对比：服务端 migration 改了/丢了什么',
+          'check-run <appId> [-q] [--variables] [--verbose]  运行时体检：抓未替换变量',
+          'versions <appId>               草稿 / version/latest / 各版本指纹对比',
+          'ruleset [--calibrate]           目标实例版本 vs 内置规则集校准版本',
           'get <appId> [--out f]',
           'publish <appId>'
         ],
+        clean: ['clean [--confirm]  清理验证留下的空应用/影子应用'],
         ds: [
           'permission <datasetId>                      查自己的读写/管理权限','list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
         perm: [
@@ -2118,12 +2353,978 @@ const commands = {
         apikey: ['create --name']
       },
       notes: [
-        'modelId 必须是 24 位 ObjectId，用 model list 只能看名字，真实 ID 从已有节点取',
-        '保存走 POST /api/core/app/version/publish?appId=，isPublish/false 是草稿',
-        'handle 由 edge() 自动生成，不要手写'
+        '任何命令加 --help 看 flags / 输出判据 / 示例：fastgpt wf build --help',
+        '`fastgpt start` 会根据当前环境告诉你下一步该敲哪一条',
+        'modelId 必须是 24 位 ObjectId，用 model list 只能看名字，真实 ID 从已有节点取'
       ]
     });
-  }
+  },
+
+  // ===== 工作流 =====
+  /**
+   * 从 DSL 构建并保存
+   * DSL: { appId, versionName?, publish?, modelId, nodes:[{type,id,...}], edges:[[src,tgt,key?]] }
+   */
+  async 'wf build'(args, f) {
+    const file = f.file || args[0];
+    if (!file) fail('需要 DSL 文件路径');
+    // 默认内联 canEdit 常量：lint 修过的东西 build 不该再拦一次（--no-inline-consts 关闭）
+    const wf = loadWorkflow(file, { ...f, 'inline-consts': f['inline-consts'] !== false });
+    const appId = wf.raw.appId || f.appId;
+    if (!appId) fail('DSL 需要 appId');
+
+    let { nodes, edges, chatConfig } = wf;
+    if (wf.fixes.length) {
+      console.error('\n🔧 已自动规范化（这些写法服务端能跑，但前端/画布不认）：');
+      wf.fixes.forEach(x => {
+        console.error(`   ${x.where}: ${x.from} → ${x.to}`);
+        console.error(`     ${x.reason}`);
+      });
+      console.error('');
+    }
+
+    // 内在参数自动调整（在 modelId 预检之前，避免给出基于错误参数的结论）
+    const tuned = autoTuneNodeParams(nodes);
+    if (tuned.length) {
+      console.error('\n⚙️  已自动调整节点参数：');
+      tuned.forEach(c => {
+        const from = c.from === undefined ? '(未设置)' : c.from;
+        console.error(`   ${c.node}.${c.param}: ${from} → ${c.to}`);
+        console.error(`     ${c.reason}`);
+      });
+      console.error('');
+    }
+
+    // dry-run 和真实部署走同一套校验（都要验证 modelId 真实性）
+    if (!f['no-model-hook']) {
+      nodes = await ensureModelIdHook(nodes, { autoFill: !f['no-auto-model'] });
+    }
+
+    const v = validateWorkflow({ nodes, edges, chatConfig });
+    if (!v.ok) {
+      failCli('workflow_validate_failed', {
+        hint: v.next,
+        details: { errors: v.errors, warnings: v.warnings, issues: v.issues,
+                   autoFixable: v.issues.filter(i => i.fix === 'auto').length,
+                   manualFixRequired: v.issues.filter(i => i.fix !== 'auto').length }
+      });
+    }
+
+    const ids = await verifyResourceIds(nodes);
+    if (ids.invalid.length) {
+      failCli('dataset_not_found', {
+        message: `引用了当前团队不存在的知识库：${ids.invalid.join(', ')}`,
+        hint: '运行 fastgpt ds list 查看可用知识库 ID',
+        details: { invalidDatasetIds: ids.invalid }
+      });
+    }
+
+    if (f['dry-run']) {
+      out(withNotice(
+        { ok: true, dryRun: true, nodes: nodes.length, edges: edges.length,
+          warnings: v.warnings, verified: { modelId: true, datasetIds: ids.checked } },
+        Notice.dryRunOnly()
+      ));
+      return;
+    }
+
+    const published = wf.raw.publish !== false;
+    await deployWorkflow({ appId, nodes, edges, chatConfig, versionName: wf.raw.versionName, publish: published });
+    const payload = { ok: true, appId, nodes: nodes.length, edges: edges.length, publish: published, warnings: v.warnings };
+    out(published ? payload : withNotice(payload, Notice.notPublished()));
+  },
+
+  /** 纯语法检查：离线，不验证 ID 真实性，不代表可部署 */
+  /**
+   * 离线体检：规范化 → 校验。
+   * --fix <out>      写出规范化结果（可直接喂 wf build）
+   * --inline-consts  canEdit 常量内联进代码（内容级修改，默认关）
+   */
+  async 'wf lint'(args, f) {
+    const file = f.file || args[0];
+    if (!file) fail('需要 JSON 文件路径');
+    const r = lintWorkflow(file, f);
+
+    if (f.fix) {
+      fs.writeFileSync(f.fix, JSON.stringify({ nodes: r.nodes, edges: r.edges, chatConfig: r.chatConfig }, null, 2));
+    }
+    out({
+      ok: r.ok,
+      lintOnly: true,
+      note: '仅语法 + 渲染契约检查，未验证 modelId / datasetId 真实性，不代表可部署',
+      nodes: r.nodes.length,
+      edges: r.edges.length,
+      autoFixed: r.fixes,
+      errors: r.errors,
+      warnings: r.warnings,
+      issues: r.issues,
+      autoFixable: r.autoFixable,
+      manualFixRequired: r.manualFixRequired,
+      ...(r.unresolvedModelIds.length ? { unresolvedModelIds: r.unresolvedModelIds } : {}),
+      ...(f.fix ? { fixedFile: f.fix } : {}),
+      next: r.ok
+        ? (f.fix
+            ? `已写出规范化结果 ${f.fix}，可直接 fastgpt wf build ${f.fix}`
+            : '语法没问题。部署用 fastgpt wf build <file>；想一次跑完全链路用 fastgpt wf verify')
+        : (r.next || '先修正 errors，再运行 fastgpt wf build')
+    });
+    if (!r.ok) process.exit(2);
+  },
+
+  /** wf validate 是 wf lint 的别名（历史命令，保留兼容） */
+  async 'wf validate'(args, f) {
+    const file = f.file || args[0];
+    if (!file) fail('需要 JSON 文件路径');
+    const r = lintWorkflow(file, f);
+    out({ ok: r.ok, nodeCount: r.nodes.length, edgeCount: r.edges.length,
+          errors: r.errors, warnings: r.warnings, issues: r.issues,
+          autoFixed: r.fixes, next: r.next });
+    if (!r.ok) process.exit(2);
+  },
+
+  async 'wf get'(args, f) {
+    const appId = f.appId || args[0];
+    const d = await client.get(`/api/core/app/detail?appId=${appId}`);
+    const payload = { nodes: d.nodes, edges: d.edges, chatConfig: d.chatConfig };
+    if (f.out) { fs.writeFileSync(f.out, JSON.stringify(payload, null, 2)); out({ ok: true, file: f.out }); }
+    else out(payload);
+  },
+
+  async 'wf publish'(args, f) {
+    const appId = f.appId || args[0];
+    const d = await client.get(`/api/core/app/detail?appId=${appId}`);
+    await client.post(`/api/core/app/version/publish?appId=${appId}`, {
+      nodes: d.nodes, edges: d.edges, chatConfig: d.chatConfig,
+      isPublish: true, autoSave: false, versionName: f.name || 'publish'
+    });
+    out(withNotice(
+      { ok: true, appId },
+      type === 'plugin' ? Notice.pluginPublished(appId) : Notice.appCreated(appId)
+    ));
+  },
+
+  /**
+   * 提交 vs 落库：服务端 migration 到底改了你什么。
+   * 服务端保存时会迁移结构、补默认值、补异常边，这些都不在响应里 —— 只能读回比。
+   * 用法：wf diff <appId> <file>
+   */
+  async 'wf diff'(args, f) {
+    const appId = f.appId || args[0];
+    const file = f.file || args[1];
+    if (!appId) fail('需要 appId');
+    if (!file) fail('需要 workflow 文件（DSL 或原生导出 JSON）');
+
+    // 与 build 对齐：loadWorkflow 已做规范化，否则会把「我们会自动修的」误报成服务端改动
+    const wf = loadWorkflow(file, f);
+
+    const stored = await client.get(`/api/core/app/detail?appId=${appId}`);
+    const diff = diffWorkflow({
+      submitted: { nodes: wf.nodes, edges: wf.edges, chatConfig: wf.chatConfig },
+      stored: { nodes: stored.nodes || [], edges: stored.edges || [], chatConfig: stored.chatConfig || {} }
+    });
+
+    const significant = diff.added.length + diff.removed.length + diff.injected.length + diff.stripped.length + diff.changed.length;
+    out(withNotice(
+      {
+        ok: diff.stripped.length === 0 && diff.removed.length === 0,
+        appId,
+        file,
+        comparedAgainst: 'app.nodes（草稿，UI 实际显示的）',
+        verdict: diff.verdict,
+        counts: {
+          added: diff.added.length,
+          removed: diff.removed.length,
+          injected: diff.injected.length,
+          stripped: diff.stripped.length,
+          changed: diff.changed.length,
+          whitelisted: diff.whitelistedCount
+        },
+        added: diff.added,
+        removed: diff.removed,
+        injected: diff.injected,
+        stripped: diff.stripped,
+        changed: diff.changed,
+        whitelisted: diff.whitelisted,
+        next: significant === 0
+          ? '提交与落库一致，本地文件可以作为 source of truth'
+          : diff.verdict === 'data_loss'
+            ? '有字段/节点没落库（被 schema strip 或被 migration 丢弃），后续编辑会丢配置：先合并进本地文件再继续'
+            : '服务端做了规范化（非破坏）。落库形态才是真的，二次编辑请基于 wf get 的结果'
+      },
+      diff.verdict === 'data_loss' ? {
+        type: 'data_loss',
+        message: '提交的内容有丢失（stripped/removed 非空）',
+        hint: '把 stripped/removed 里的项合并回本地文件；落库形态才是 source of truth'
+      } : null
+    ));
+    if (diff.verdict === 'data_loss') process.exit(2);
+  },
+
+  /**
+   * 一条龙验证：lint → dry-run → 部署 → diff → 运行时 →（可选）UI。
+   * 默认在「影子应用」上做，跑完自动删除；--appId 则直接对指定应用跑（会写入）。
+   * 任一步失败即停，返回 failedAt + 该步 hint + 已跑完的步骤轨迹。
+   */
+  async 'wf verify'(args, f) {
+    const file = f.file || args[0];
+    if (!file) fail('需要 workflow 文件（DSL 或原生导出 JSON）');
+
+    const steps = [];
+    const t0 = Date.now();
+    const push = (step, ok, detail = {}) => steps.push({ step, ok, ms: Date.now() - t0, ...detail });
+    const stop = async (step, hint, details) => {
+      const st = readState();
+      if (st.shadowApps?.length) { /* 由 cleanupShadow 处理当前影子 */ }
+      out({ ok: false, failedAt: step, file, steps, hint, ...(details ? { details } : {}),
+            next: `修掉 ${step} 的问题后重跑 fastgpt wf verify ${file}` });
+      process.exit(2);
+    };
+
+    // ① 离线体检 + 规范化（默认内联 canEdit 常量）
+    const lint = lintWorkflow(file, { ...f, 'inline-consts': f['inline-consts'] !== false });
+    push('lint', lint.ok, {
+      nodes: lint.nodes.length, edges: lint.edges.length,
+      autoFixed: lint.fixes.length, issues: lint.issues.length, manualFixRequired: lint.manualFixRequired
+    });
+    if (!lint.ok) stop('lint', lint.next || '先修 lint 的 manual 项', { issues: lint.issues });
+
+    // ② 目标：默认影子应用（不碰生产）
+    const mode = f.appId ? 'app' : 'shadow';
+    let appId = f.appId;
+    if (mode === 'shadow') {
+      appId = await client.post('/api/core/app/create', {
+        name: f.name || `cli-verify-${Date.now()}`, type: 'advanced',
+        avatar: 'core/app/type/workflowFill', intro: ''
+      });
+      trackShadow(appId, 'add');
+    }
+    push('target', true, { mode, appId });
+
+    // 失败也要清理影子：process.exit 会跳过 finally，所以清理必须显式做
+    const cleanupShadow = async () => {
+      if (mode !== 'shadow' || f.keep === true) return;
+      try { await client.del(`/api/core/app/del?appId=${appId}`); trackShadow(appId, 'remove'); } catch {}
+    };
+
+    try {
+      // ③ 校验 + ID 真实性
+      let { nodes, edges, chatConfig } = lint;
+      if (!f['no-model-hook']) nodes = await ensureModelIdHook(nodes, { autoFill: !f['no-auto-model'] });
+      const v = validateWorkflow({ nodes, edges, chatConfig });
+      if (!v.ok) { push('validate', false, { errors: v.errors }); stop('validate', v.next, { issues: v.issues }); }
+      const ids = await verifyResourceIds(nodes);
+      if (ids.invalid.length) {
+        push('resource_ids', false, { invalid: ids.invalid });
+        stop('resource_ids', 'datasetId 不在当前团队：先 fastgpt ds list 确认', { invalidDatasetIds: ids.invalid });
+      }
+      push('validate', true, { datasetIds: ids.checked, warnings: v.warnings.length });
+
+      // ④ 部署
+      await deployWorkflow({ appId, nodes, edges, chatConfig, versionName: f.versionName || 'cli-verify', publish: true });
+      push('deploy', true, { nodes: nodes.length, edges: edges.length });
+
+      // ⑤ 提交 vs 落库
+      const stored = await client.get(`/api/core/app/detail?appId=${appId}`);
+      const diff = diffWorkflow({
+        submitted: { nodes, edges, chatConfig },
+        stored: { nodes: stored.nodes || [], edges: stored.edges || [], chatConfig: stored.chatConfig || {} }
+      });
+      push('diff', diff.verdict !== 'data_loss', {
+        verdict: diff.verdict,
+        counts: { added: diff.added.length, removed: diff.removed.length, injected: diff.injected.length,
+                  stripped: diff.stripped.length, changed: diff.changed.length, whitelisted: diff.whitelistedCount }
+      });
+      if (diff.verdict === 'data_loss') {
+        stop('diff', '提交的内容有丢失（stripped/removed 非空），先合并回本地文件', { stripped: diff.stripped, removed: diff.removed });
+      }
+
+      // ⑥ 运行时（没有 apikey 就跳过，不算失败）
+      const keyFile = f.keyFile || '.fastgpt/apikey';
+      const key = f.key || process.env.FASTGPT_APP_KEY || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : '');
+      let variables;
+      if (f.variables) { try { variables = JSON.parse(f.variables); } catch { fail('--variables 需要 JSON 字符串'); } }
+      if (!key) {
+        push('run', true, { skipped: `没有 API Key（${keyFile}），跳过运行时体检` });
+      } else {
+        const r = await runWorkflowOnce({ appId, key, variables, question: f.q, chatId: f.chatId });
+        push('run', r.ok, {
+          httpStatus: r.httpStatus, Status: r.Status, DataSetDate: r.DataSetDate,
+          domains: r.domains, unresolved: r.unresolvedVariables, trace: r.trace
+        });
+        if (!r.ok) stop('run', '运行时不通过：变量没替换或契约异常', r);
+      }
+
+      // ⑦ 可选 UI 校验（外挂命令，保持 CLI 零依赖；{appId} 会被替换）
+      if (f['ui-cmd']) {
+        const { execSync } = await import('node:child_process');
+        const cmd = String(f['ui-cmd']).replace(/\{appId\}/g, appId);
+        try {
+          const stdout = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          push('ui', true, { cmd, tail: String(stdout).trim().slice(-400) });
+        } catch (e) {
+          push('ui', false, { cmd, exit: e.status });
+          stop('ui', 'UI 校验未通过（前端仍有报错/裸变量/缺芯片）', { tail: String(e.stdout || e.stderr || '').trim().slice(-1500) });
+        }
+      }
+    } finally {
+      if (mode === 'shadow' && f.keep === true) {
+        push('cleanup', true, { appId, kept: true });
+      } else if (mode === 'shadow') {
+        await cleanupShadow();
+        push('cleanup', !shadowCreated, { appId });
+      }
+    }
+
+    const total = Date.now() - t0;
+    out(withNotice({
+      ok: true,
+      file,
+      target: { mode, appId },
+      verdict: 'all_passed',
+      totalMs: total,
+      steps,
+      next: mode === 'shadow'
+        ? `影子应用验证通过。对生产应用执行：fastgpt wf verify ${file} --appId <appId>`
+        : '全链路通过，可以交付'
+    }, {
+      type: 'verify_passed',
+      message: '全链路通过',
+      hint: mode === 'shadow' ? '影子应用已删除（--keep 可保留）；生产应用尚未写入' : undefined
+    }));
+  },
+
+  /**
+   * 规则集对齐：本地校验规则是照某一版平台行为写死的，平台升级会漂。
+   * 这个命令拉目标实例版本，与内置规则集校准版本比对，让漂移可见。
+   * 只能比版本号 —— 要拿到目标实例真实码集必须抓它的前端 chunk（见 --calibrate）。
+   */
+  async 'wf ruleset'(args, f) {
+    let systemVersion;
+    let base = client.base;
+    try {
+      const d = await client.get('/api/common/system/getInitData');
+      systemVersion = d?.systemVersion;
+    } catch (e) {
+      // 未登录也能报出版本（有些实例该接口公开）；真拿不到就标 unknown
+    }
+    const cmp = compareRuleset({ targetVersion: systemVersion });
+
+    if (f.calibrate) {
+      out({ ok: true, base, target: { systemVersion }, compare: cmp, calibrate: calibrateRuleset() });
+      return;
+    }
+
+    out(withNotice({
+      ok: true,
+      base,
+      target: { systemVersion: systemVersion || 'unknown' },
+      compare: cmp,
+      localIssueCodes: Object.keys(cmp).length ? undefined : undefined,
+      officialCodeSample: DIAGNOSTIC_CODES.slice(0, 6),
+      next: cmp.versionMatch
+        ? '版本对齐。校验结论可直接参考；平台升级后再跑一次本命令'
+        : '版本漂移：跑 fastgpt wf ruleset --calibrate 获取重新校准步骤'
+    }, cmp.versionMatch ? null : {
+      type: 'ruleset_drift',
+      message: `内置规则集按 ${cmp.calibratedWith} 校准，目标实例是 ${cmp.targetVersion}`,
+      hint: '版本不一致不代表一定错，但「平台新增的规则我不知道」这类风险会出现；按 --calibrate 的步骤重新校准'
+    }));
+  },
+
+  /** 草稿 / 版本层一致性：判断「我改的东西到底写进哪一层了」 */
+  async 'wf versions'(args, f) {
+    const appId = f.appId || args[0];
+    if (!appId) fail('需要 appId');
+    const fp = nodes => {
+      const sig = (nodes || []).map(n => `${n.nodeId}:${(n.inputs || []).map(i => i.key).join('|')}`).join('\n');
+      let h = 0;
+      for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) | 0;
+      return { nodes: (nodes || []).length, hash: (h >>> 0).toString(16) };
+    };
+    const draft = await client.get(`/api/core/app/detail?appId=${appId}`);
+    const latest = await client.get(`/api/core/app/version/latest?appId=${appId}`);
+    const list = await client.post('/api/core/app/version/list', { appId, offset: 0, pageSize: f.count || 5 });
+    const rows = [
+      { layer: 'draft(app.nodes)', id: draft._id, time: draft.updateTime, fp: fp(draft.nodes), publishedVersionId: draft.publishedVersionId },
+      { layer: 'version/latest', id: latest._id, name: latest.versionName, fp: fp(latest.nodes) }
+    ];
+    for (const v of (list.list || list)) {
+      const d = await client.get(`/api/core/app/version/detail?appId=${appId}&versionId=${v._id}`).catch(() => ({ nodes: [] }));
+      rows.push({ layer: v.isPublish ? 'version(published)' : 'version(draft)', id: v._id, name: v.versionName, time: v.time, fp: fp(d.nodes) });
+    }
+    const published = rows.find(r => r.layer === 'version(published)');
+    out({
+      ok: true,
+      appId,
+      rows,
+      consistent: published ? draft && fp(draft.nodes).hash === published.fp.hash : null,
+      note: 'OpenAPI 跑发布版本，UI 看草稿。编辑器一打开前端会 autoSave 覆盖草稿，两者不一致时先 publish 再判断。'
+    });
+  },
+
+  async 'wf check-run'(args, f) {
+    const appId = f.appId || args[0];
+    if (!appId) fail('需要 appId');
+    const keyFile = f.keyFile || '.fastgpt/apikey';
+    const key = f.key || process.env.FASTGPT_APP_KEY || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : '');
+    if (!key) fail('缺少 API Key：先 fastgpt apikey create --name cli，或传 --key');
+    let variables;
+    if (f.variables) {
+      try { variables = JSON.parse(f.variables); } catch { fail('--variables 需要 JSON 字符串'); }
+    }
+
+    const r = await runWorkflowOnce({ appId, key, variables, question: f.q, chatId: f.chatId });
+    if (r.httpStatus !== 200) fail(`对话接口返回 ${r.httpStatus}: ${r.error || ''}`);
+
+    const slim = {
+      ok: r.ok, appId, httpStatus: r.httpStatus, Status: r.Status, DataSetDate: r.DataSetDate,
+      domains: r.domains, unresolvedVariables: r.unresolvedVariables,
+      ...(f.verbose ? { trace: r.trace, contentLength: r.contentLength } : {})
+    };
+    out(withNotice(slim, r.ok ? null : {
+      type: 'unresolved_variable',
+      message: '运行时有变量没被替换，值里残留 {{...}}',
+      hint: '检查该节点输入是否引用了未定义/未传值的全局变量；wf lint 能提前发现裸占位'
+    }));
+    if (!r.ok) process.exit(2);
+  },
+
+  // ===== 知识库 =====
+  async 'ds list'(args, f) {
+    const d = await client.post('/api/core/dataset/list', { parentId: null, searchKey: f.search || '' });
+    out((d || []).map(x => ({ _id: x._id, name: x.name, type: x.type, vectorModel: x.vectorModel?.name })));
+  },
+
+  async 'ds create'(args, f) {
+    if (!f.name) fail('需要 --name');
+    const id = await client.post('/api/core/dataset/create', {
+      parentId: f.parentId || null, name: f.name, type: 'dataset', intro: f.intro || '',
+      avatar: f.avatar || 'core/dataset/commonDatasetColor'
+    });
+    out({ ok: true, datasetId: id });
+  },
+
+  /** 查自己对某个资源有什么权限（只读/读写/管理） */
+  async 'ds permission'(args, f) {
+    const id = f.id || args[0];
+    if (!id) fail('用法: ds permission <datasetId>');
+    // getPermission 返回的字段不完整（只有 read/write），权限对象要从协作者列表拿
+    const [detail, clbs] = await Promise.all([
+      client.get(`/api/core/dataset/getPermission?id=${id}`).catch(() => null),
+      client.get(`/api/proApi/core/dataset/collaborator/list?datasetId=${id}`).catch(() => null)
+    ]);
+    const me = (clbs?.clbs || []).find(c => c.permission?.isOwner) || (clbs?.clbs || [])[0];
+    const p = me?.permission || {};
+    out({
+      datasetId: id,
+      name: detail?.datasetName,
+      read: !!p.hasReadPer,
+      write: !!p.hasWritePer,
+      manage: !!p.hasManagePer,
+      isOwner: !!p.isOwner,
+      permissionValue: p.permission,
+      canSetCollaborator: !!p.hasManagePer,
+      collaborators: (clbs?.clbs || []).map(c => ({
+        tmbId: c.tmbId, name: c.name, permission: c.permission?.permission
+      }))
+    });
+  },
+
+  async 'ds detail'(args, f) {
+    const id = f.id || args[0];
+    const d = await client.get(`/api/core/dataset/detail?id=${id}`);
+    out({ _id: d._id, name: d.name, type: d.type, vectorModel: d.vectorModel?.name, collectionCount: d.collectionCount });
+  },
+
+  /** 上传本地文件创建文档。默认分块训练 + 全增强 */
+  async 'ds add-file'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    const filePath = f.file || args[1];
+    if (!datasetId || !filePath) fail('用法: ds add-file <datasetId> <文件路径>');
+    if (!fs.existsSync(filePath)) fail(`文件不存在: ${filePath}`);
+
+    const d = await client.upload('/api/core/dataset/collection/create/localFile', {
+      fields: { data: JSON.stringify({
+        datasetId, parentId: f.parentId || null,
+        trainingType: 'chunk', chunkTriggerType: 'forceChunk',
+        chunkSettingMode: 'custom', chunkSplitMode: 'size',
+        chunkSize: Number(f.chunkSize) || 2000, indexSize: Number(f.chunkSize) || 2000,
+        customPdfParse: true, autoIndexes: true, imageIndex: true,
+        dataEnhanceCollectionName: true, indexPrefixTitle: true
+      }) },
+      file: { name: f.name || path.basename(filePath), buffer: fs.readFileSync(filePath) }
+    });
+    out(withNotice(
+      { ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen },
+      Notice.trainingAsync(d.collectionId)
+    ));
+  },
+
+  /** 纯文本创建文档 */
+  async 'ds add-text'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    const text = f.text || (f.file ? fs.readFileSync(f.file, 'utf8') : null);
+    if (!datasetId || !text) fail('用法: ds add-text <datasetId> --name "标题" --text "内容"');
+    const d = await client.post('/api/core/dataset/collection/create/text', {
+      datasetId, name: f.name || `text-${Date.now()}`, text,
+      trainingType: 'chunk', chunkTriggerType: 'forceChunk',
+      chunkSettingMode: 'custom', chunkSplitMode: 'size',
+      chunkSize: Number(f.chunkSize) || 2000, indexSize: Number(f.chunkSize) || 2000,
+      customPdfParse: true, autoIndexes: true, imageIndex: true,
+      dataEnhanceCollectionName: true, indexPrefixTitle: true
+    });
+    out(withNotice(
+      { ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen },
+      Notice.trainingAsync(d.collectionId)
+    ));
+  },
+
+  /** 网页链接创建文档 */
+  async 'ds add-link'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    const link = f.url || args[1];
+    if (!datasetId || !link) fail('用法: ds add-link <datasetId> <url> [--selector "css"]');
+    const d = await client.post('/api/core/dataset/collection/create/link', {
+      datasetId, link,
+      name: f.name || link,
+      selector: f.selector || '',
+      trainingType: 'chunk', chunkTriggerType: 'forceChunk',
+      chunkSettingMode: 'custom', chunkSplitMode: 'size',
+      chunkSize: Number(f.chunkSize) || 2000, indexSize: Number(f.chunkSize) || 2000,
+      customPdfParse: true, autoIndexes: true, imageIndex: true,
+      dataEnhanceCollectionName: true, indexPrefixTitle: true
+    });
+    out(withNotice(
+      { ok: true, collectionId: d.collectionId, inserted: d.results?.insertLen },
+      Notice.trainingAsync(d.collectionId)
+    ));
+  },
+
+  /** 文档列表 */
+  async 'ds collections'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    if (!datasetId) fail('用法: ds collections <datasetId>');
+    const d = await client.post('/api/core/dataset/collection/listV2', {
+      datasetId, parentId: f.parentId || null,
+      pageNum: Number(f.page) || 1, pageSize: Number(f.size) || 20,
+      searchText: f.search || ''
+    });
+    out({
+      total: d.total,
+      list: (d.list || []).map(c => ({
+        _id: c._id, name: c.name, type: c.type,
+        trainingType: c.trainingType, fileId: c.fileId,
+        createTime: c.createTime
+      }))
+    });
+  },
+
+  /** 训练状态 */
+  async 'ds training'(args, f) {
+    const collectionId = f.id || args[0];
+    if (!collectionId) fail('用法: ds training <collectionId>');
+    const d = await client.get(`/api/core/dataset/collection/trainingDetail?collectionId=${collectionId}`);
+    const pending = Object.fromEntries(Object.entries(d.queuedCounts || {}).filter(([, v]) => v > 0));
+    const errored = Object.fromEntries(Object.entries(d.errorCounts || {}).filter(([, v]) => v > 0));
+    out({
+      collectionId,
+      trainingType: d.trainingType,
+      advancedTraining: d.advancedTraining,
+      pending,
+      errors: errored,
+      done: Object.keys(pending).length === 0,
+      hint: Object.keys(pending).length ? '还在训练，检索会返回空，请继续轮询' : '训练完成，可以检索'
+    });
+  },
+
+  /** 重新训练 */
+  async 'ds retrain'(args, f) {
+    const collectionId = f.id || args[0];
+    if (!collectionId) fail('用法: ds retrain <collectionId>');
+    await client.post('/api/core/dataset/collection/create/reTrainingCollection', {
+      collectionId,
+      trainingType: f.mode || 'chunk',
+      chunkTriggerType: 'forceChunk'
+    });
+    out({ ok: true, collectionId });
+  },
+
+  /** 查看文档切分后的数据块 */
+  async 'ds data'(args, f) {
+    const collectionId = f.id || args[0];
+    if (!collectionId) fail('用法: ds data <collectionId>');
+    const d = await client.post('/api/core/dataset/data/v2/list', {
+      collectionId, pageNum: Number(f.page) || 1, pageSize: Number(f.size) || 20
+    });
+    out({ total: d.total, list: (d.list || []).map(x => ({ _id: x._id, q: x.q?.slice(0, 80), a: x.a?.slice(0, 80) })) });
+  },
+
+  /**
+   * 批量上传：支持目录递归 / 多文件 / 扩展名过滤 / 并发
+   * 用法: ds add-batch <datasetId> <路径...> [--ext pdf,docx] [--concurrency 3]
+   */
+  async 'ds add-batch'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    const paths = args.slice(1);
+    if (!datasetId || !paths.length) fail('用法: ds add-batch <datasetId> <文件或目录...> [--ext pdf,md]');
+
+    const exts = f.ext ? String(f.ext).split(',').map(e => e.trim().replace(/^\./, '')).filter(Boolean) : null;
+    const files = [];
+    const walk = p => {
+      const st = fs.statSync(p);
+      if (st.isDirectory()) {
+        for (const name of fs.readdirSync(p)) walk(path.join(p, name));
+      } else {
+        if (exts && !exts.some(e => p.toLowerCase().endsWith('.' + e.toLowerCase()))) return;
+        if (path.basename(p).startsWith('.')) return;
+        files.push(p);
+      }
+    };
+    for (const p of paths) {
+      if (!fs.existsSync(p)) fail(`路径不存在: ${p}`);
+      walk(p);
+    }
+    if (!files.length) fail('没有匹配到文件');
+
+    const trainingData = JSON.stringify({
+      datasetId, parentId: f.parentId || null,
+      trainingType: 'chunk', chunkTriggerType: 'forceChunk',
+      chunkSettingMode: 'custom', chunkSplitMode: 'size',
+      chunkSize: Number(f.chunkSize) || 2000, indexSize: Number(f.chunkSize) || 2000,
+      customPdfParse: true, autoIndexes: true, imageIndex: true,
+      dataEnhanceCollectionName: true, indexPrefixTitle: true
+    });
+
+    const results = [];
+    let cursor = 0;
+    const conc = Math.max(1, Number(f.concurrency) || 3);
+
+    async function worker() {
+      while (cursor < files.length) {
+        const filePath = files[cursor++];
+        try {
+          const d = await client.upload('/api/core/dataset/collection/create/localFile', {
+            fields: { data: trainingData },
+            file: { name: path.basename(filePath), buffer: fs.readFileSync(filePath) }
+          });
+          results.push({ file: filePath, ok: true, collectionId: d.collectionId });
+          console.error(`  ✓ ${path.basename(filePath)}`);
+        } catch (e) {
+          results.push({ file: filePath, ok: false, error: e.message });
+          console.error(`  ✗ ${path.basename(filePath)}: ${e.message}`);
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(conc, files.length) }, worker));
+
+    const okCount = results.filter(r => r.ok).length;
+    out({ ok: okCount === files.length, total: files.length, success: okCount, failed: files.length - okCount, results });
+  },
+
+  /**
+   * QA 模式：导入问答对
+   * 用法: ds add-qa <datasetId> --file qa.json [--name FAQ]
+   *       ds add-qa <datasetId> --q "问题" --a "答案"
+   *       ds add-qa <datasetId> --file qa.json --collectionId <已有集合>
+   */
+  async 'ds add-qa'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    if (!datasetId) fail('用法: ds add-qa <datasetId> --file qa.json | --q "问" --a "答"');
+
+    // 构造问答对
+    let pairs = [];
+    if (f.file) {
+      const raw = JSON.parse(fs.readFileSync(f.file, 'utf8'));
+      pairs = Array.isArray(raw) ? raw : (raw.data || raw.list || []);
+    } else if (f.q && f.a !== undefined) {
+      pairs = [{ q: f.q, a: f.a }];
+    } else {
+      fail('需要 --file qa.json 或 --q/--a');
+    }
+    if (!pairs.length) fail('问答对为空');
+    for (const [i, p] of pairs.entries()) {
+      if (typeof p.q !== 'string' || !p.q) fail(`第 ${i + 1} 条缺少 q`);
+    }
+
+    // 集合：指定或新建 QA 集合
+    let collectionId = f.collectionId;
+    if (!collectionId) {
+      collectionId = await client.post('/api/core/dataset/collection/create', {
+        datasetId, name: f.name || `FAQ-${Date.now()}`, type: 'virtual', trainingType: 'qa'
+      });
+      if (collectionId && typeof collectionId === 'object') collectionId = collectionId.collectionId;
+    }
+
+    // 逐条插入（接口不支持批量）
+    const inserted = [];
+    const failed = [];
+    for (const [i, p] of pairs.entries()) {
+      try {
+        const d = await client.post('/api/core/dataset/data/insertData', {
+          collectionId, q: p.q, a: p.a ?? ''
+        });
+        inserted.push({ q: p.q, dataIds: d?.dataIds });
+      } catch (e) {
+        failed.push({ q: p.q, error: e.message });
+      }
+      if ((i + 1) % 10 === 0) console.error(`  已插入 ${i + 1}/${pairs.length}`);
+    }
+
+    out({
+      ok: failed.length === 0, collectionId,
+      total: pairs.length, inserted: inserted.length, failed: failed.length,
+      failures: failed.slice(0, 5)
+    });
+  },
+
+  /** 检索测试：验证知识库能不能召回 */
+  async 'ds search'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    const text = f.text || args[1];
+    if (!datasetId || !text) fail('用法: ds search <datasetId> "查询词" [--limit 3] [--similarity 0.2]');
+    const d = await client.post('/api/core/dataset/searchTest', {
+      datasetId, text,
+      limit: Number(f.limit) || 3,
+      similarity: Number(f.similarity) || 0.2,
+      searchMode: f.mode || 'embedding'
+    });
+    const total = (d.list || []).length;
+    out(withNotice({
+      ok: true, duration: d.duration, total,
+      list: (d.list || []).map(x => ({
+        // score 是数组 [{type,value,index}]，取最高分
+        score: Math.max(...(Array.isArray(x.score) ? x.score.map(v => v.value ?? v) : [x.score ?? 0])),
+        source: x.sourceName, chunkIndex: x.chunkIndex,
+        text: (x.q || '').slice(0, 120)
+      }))
+    }, total === 0 ? Notice.emptySearch(datasetId) : null));
+  },
+
+  /** 删除文档 */
+  async 'ds del'(args, f) {
+    const collectionId = f.id || args[0];
+    if (!collectionId) fail('用法: ds del <collectionId>');
+    const ids = String(collectionId).split(',');
+    await client.post('/api/core/dataset/collection/delete', { collectionIds: ids });
+    out({ ok: true, deleted: ids });
+  },
+
+  /** 删除知识库 */
+  async 'ds delete'(args, f) {
+    const datasetId = f.id || args[0];
+    if (!datasetId) fail('用法: ds delete <datasetId>');
+    await client.del(`/api/core/dataset/delete?id=${datasetId}`);
+    out({ ok: true, deleted: datasetId });
+  },
+
+  /** 文档级权限开关（开启后才能用 perm collection） */
+  async 'ds perm'(args, f) {
+    const datasetId = f.datasetId || args[0];
+    const action = f.action || args[1];
+    if (!datasetId || !['on', 'off'].includes(action)) fail('用法: ds perm <datasetId> on|off');
+    await client.post(`/api/core/dataset/${action === 'on' ? 'enableCollectionPermission' : 'disableCollectionPermission'}`, { datasetId });
+    out({ ok: true, datasetId, collectionPermission: action });
+  },
+
+  // ===== 权限 =====
+  async 'perm dataset'(args, f) {
+    const id = f.id || args[0];
+    if (f.set) {
+      const [tmbId, perm] = String(f.set).split(':');
+      if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（1管理 2写 4读，相加）');
+      const r = await updateCollaborators({
+        ...RESOURCES.dataset, id, tmbId, permission: Number(perm)
+      });
+      out({ ok: true, datasetId: id, tmbId, permission: Number(perm), total: r.count });
+    } else {
+      const d = await client.get(`/api/proApi/core/dataset/collaborator/list?datasetId=${id}`);
+      out((d.clbs || []).map(c => ({ tmbId: c.tmbId, name: c.name, permission: c.permission?.permission,
+        read: c.permission?.hasReadPer, write: c.permission?.hasWritePer, manage: c.permission?.hasManagePer,
+        isOwner: c.permission?.isOwner })));
+    }
+  },
+
+  async 'perm collection'(args, f) {
+    const id = f.id || args[0];
+    if (f.set) {
+      const [tmbId, perm] = String(f.set).split(':');
+      const r = await updateCollaborators({
+        ...RESOURCES.collection, id, tmbId, permission: Number(perm)
+      });
+      out({ ok: true, collectionId: id, tmbId, permission: Number(perm), total: r.count });
+    } else {
+      const d = await client.get(`/api/proApi/core/dataset/collection/collaborator/list?collectionId=${id}`);
+      out((d.clbs || []).map(c => ({ tmbId: c.tmbId, name: c.name, permission: c.permission?.permission,
+        read: c.permission?.hasReadPer, write: c.permission?.hasWritePer, manage: c.permission?.hasManagePer,
+        isOwner: c.permission?.isOwner })));
+    }
+  },
+
+  async 'perm app'(args, f) {
+    const id = f.id || args[0];
+    if (!id) fail('用法: perm app <appId> [--set tmbId:权限]');
+    if (f.set) {
+      const [tmbId, perm] = String(f.set).split(':');
+      if (!tmbId || perm === undefined) fail('--set 格式: tmbId:权限（权限 1管理 2写 4读，相加）');
+      const r = await updateCollaborators({
+        ...RESOURCES.app, id, tmbId, permission: Number(perm)
+      });
+      out({ ok: true, appId: id, tmbId, permission: Number(perm), total: r.count });
+      return;
+    }
+    if (f.del) {
+      await client.del(`/api/proApi/core/app/collaborator/delete?appId=${id}&tmbId=${f.del}`);
+      out({ ok: true, appId: id, removed: f.del });
+      return;
+    }
+    const d = await client.get(`/api/proApi/core/app/collaborator/list?appId=${id}`);
+    out((d.clbs || []).map(c => ({
+      tmbId: c.tmbId, name: c.name,
+      permission: c.permission?.permission,
+      read: c.permission?.hasReadPer, write: c.permission?.hasWritePer, manage: c.permission?.hasManagePer,
+      isOwner: c.permission?.isOwner
+    })));
+  },
+
+  async 'perm member'(args, f) {
+    // 写操作
+    if (f.del) {
+      await client.del(`/api/proApi/support/user/team/member/delete?tmbId=${f.del}`);
+      out({ ok: true, removed: f.del });
+      return;
+    }
+    if (f.restore) {
+      await client.post('/api/proApi/support/user/team/member/restore', { tmbId: f.restore });
+      out({ ok: true, restored: f.restore });
+      return;
+    }
+    if (f.rename) {
+      const [tmbId, ...rest] = String(f.rename).split(':');
+      await client.put('/api/proApi/support/user/team/member/updateNameByManager', {
+        tmbId, name: rest.join(':')
+      });
+      out({ ok: true, tmbId, name: rest.join(':') });
+      return;
+    }
+    if (f.count) {
+      const d = await client.get('/api/proApi/support/user/team/member/count');
+      out(d);
+      return;
+    }
+    const d = await client.post('/api/proApi/support/user/team/member/list', {
+      teamId: null, searchKey: f.search || '', pageNum: 1, pageSize: Number(f.limit) || 100
+    });
+    out({
+      total: d.total,
+      list: (d.list || []).map(m => ({
+        tmbId: m.tmbId, userId: m.userId, name: m.memberName, role: m.role, status: m.status
+      }))
+    });
+  },
+
+  /** 团队级协作者权限（整个团队能做什么，不是某个资源的） */
+  async 'perm team'(args, f) {
+    if (f.set) {
+      const [tmbId, perm] = String(f.set).split(':');
+      await client.put('/api/proApi/support/user/team/collaborator/updateOne', {
+        tmbId, permission: Number(perm)
+      });
+      out({ ok: true, tmbId, permission: Number(perm) });
+      return;
+    }
+    if (f.del) {
+      await client.del(`/api/proApi/support/user/team/collaborator/delete?tmbId=${f.del}`);
+      out({ ok: true, removed: f.del });
+      return;
+    }
+    const d = await client.get('/api/proApi/support/user/team/collaborator/list');
+    out((d.clbs || []).map(c => ({
+      tmbId: c.tmbId, name: c.name, permission: c.permission?.permission,
+      read: c.permission?.hasReadPer, write: c.permission?.hasWritePer, manage: c.permission?.hasManagePer,
+      isOwner: c.permission?.isOwner
+    })));
+  },
+
+  /** 邀请链接：团队成员只能通过邀请加入，没有直接 add 接口 */
+  async 'perm invite'(args, f) {
+    if (f.create) {
+      const d = await client.post('/api/proApi/support/user/team/invitationLink/create', {
+        description: f.desc || 'cli-created',
+        expires: f.expires || '7d',       // 30m | 7d | 1y
+        usedTimesLimit: Number(f.limit ?? -1)   // 1 = 一次, -1 = 无限
+      });
+      out({ ok: true, linkId: d, url: `${client.base}/account/invite?linkId=${d}` });
+      return;
+    }
+    if (f.forbid) {
+      await client.put('/api/proApi/support/user/team/invitationLink/forbid', { linkId: f.forbid });
+      out({ ok: true, forbidden: f.forbid });
+      return;
+    }
+    const list = await client.get('/api/proApi/support/user/team/invitationLink/list');
+    out((list || []).map(x => ({
+      linkId: x.linkId, description: x.description, expires: x.expires,
+      usedTimesLimit: x.usedTimesLimit, forbidden: x.forbidden,
+      used: (x.members || []).length, members: x.members
+    })));
+  },
+
+  // ===== 运行调试 =====
+  async 'chat run'(args, f) {
+    const appId = f.appId || args[0];
+    const q = f.q || f.question;
+    if (!appId || !q) fail('需要 --appId 和 -q "问题"');
+    const key = f.key || process.env.FASTGPT_APP_KEY || fs.readFileSync('.fastgpt/apikey', 'utf8').trim();
+    const res = await fetch(`${client.base}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        appId, chatId: f.chatId || `cli-${Date.now()}`, stream: true, detail: !!f.detail,
+        messages: [{ role: 'user', content: q }]
+      })
+    });
+    if (!res.ok) {
+      let body = '';
+      try { body = await res.text(); } catch {}
+      let detail = {};
+      try { detail = JSON.parse(body); } catch {}
+      const msg = detail?.message || body.slice(0, 200);
+      if (/not.publish|未发布|no.*version|版本不存在/i.test(msg) || res.status === 404) {
+        const e = cliError('app_not_published');
+        out({ ...e.toEnvelope(), details: { appId, status: res.status, response: msg } });
+        process.exit(exitCodeFor(e));
+      }
+      fail(`对话接口返回 ${res.status}: ${msg}`);
+    }
+    const text = await res.text();
+    // 解析 SSE
+    let answer = '', trace = [];
+    for (const block of text.split('\n\n')) {
+      const m = /^event: (\w+)\ndata: (.+)$/m.exec(block);
+      if (!m) continue;
+      const [, ev, data] = m;
+      try {
+        const j = JSON.parse(data);
+        if (ev === 'flowNodeStatus') trace.push(`${j.status}:${j.name}`);
+        // answer: chatNode 的流式增量；fastAnswer: answerNode 的一次性输出
+        if (ev === 'answer' || ev === 'fastAnswer') {
+          answer += j.choices?.[0]?.delta?.content || '';
+        }
+      } catch {}
+    }
+    out(withNotice(
+      { ok: true, trace, answer },
+      !answer ? Notice.emptyAnswer(appId) : null
+    ));
+  },
+
+  async 'apikey create'(args, f) {
+    const key = await client.post('/api/support/openapi/create', { name: f.name || `cli-${Date.now()}` });
+    fs.mkdirSync('.fastgpt', { recursive: true });
+    fs.writeFileSync('.fastgpt/apikey', key, { mode: 0o600 });
+    out({ ok: true, apiKey: key });
+  },
+
 };
 
 // ---------- 分发 ----------
@@ -2136,9 +3337,23 @@ const candidates = [
   pos.slice(0, 2).join(' '),
   pos[0]
 ];
+// --help / help 先拦：`fastgpt wf --help` 以前会被当成未知命令
+if (pos[0] === 'help' || flags.help === true) {
+  await commands.help(pos[0] === 'help' ? pos.slice(1) : pos);
+  process.exit(0);
+}
+
 const key = candidates.find(k => commands[k]);
 const fn = key ? commands[key] : null;
-if (!fn) { out({ ok: false, error: `未知命令: ${pos.slice(0, 3).join(' ')}` }); await commands.help(); process.exit(1); }
+if (!fn) {
+  out({
+    ok: false,
+    error: `未知命令: ${pos.slice(0, 3).join(' ')}`,
+    hint: '看全部命令：fastgpt help；看某一组：fastgpt help wf；看某条：fastgpt help wf build',
+    next_command: 'fastgpt help'
+  });
+  process.exit(1);
+}
 // 已消费的参数层级
 const consumed = key.split(' ').length;
 // 离线命令：不触网，不需要鉴权
