@@ -438,6 +438,14 @@ function writeState(patch) {
     fs.writeFileSync(STATE_PATH, JSON.stringify(next, null, 2), { mode: 0o600 });
   } catch {}
 }
+/** 本地记一份工具名 -> appId，方便 agent 反查 */
+function upsertTool(name, appId) {
+  const st = readState();
+  const tools = st.tools || {};
+  tools[name] = { appId, at: new Date().toISOString() };
+  writeState({ tools });
+}
+
 function trackShadow(appId, action) {
   const st = readState();
   const list = new Set(st.shadowApps || []);
@@ -1702,6 +1710,72 @@ const commands = {
     });
   },
 
+  /**
+   * 生成一个工具（plugin 应用）骨架。
+   * 把「pluginInput → code → pluginOutput」的接线、main 解构、outputs 声明全部固化，
+   * 免去手工踩 main/解构重名/引用路径这几类只在服务端才报的坑。
+   */
+  async 'tool new'(args, f) {
+    const name = f.name || args[0];
+    if (!name) fail('需要工具名', '用法：fastgpt tool new --name dt_query --params filters,groupBy [--code body.js] [--deploy]', 'fastgpt tool new --name my_tool');
+
+    const params = String(f.params || '')
+      .split(',')
+      .map(x => x.trim())
+      .filter(Boolean)
+      .map(key => ({ key, label: key, valueType: 'string', required: false }));
+
+    // 代码：给了文件就用，否则生成带解构参数的模板
+    let body = '';
+    if (f.code) {
+      body = fs.readFileSync(String(f.code), 'utf8');
+    } else {
+      const picks = params.map(p => `//   ${p.key} = ${p.key};`).join('\n');
+      body = `// 可直接用的入参（已从 inputs 解构）：\n${picks || '//   无参数'}\n// TODO: 你的逻辑\nreturn { ok: true };`;
+    }
+    // 统一包成 function main({ ... })；已经写好的不重复包
+    const code = /function\s+main\s*\(/.test(body)
+      ? body
+      : `async function main({ ${params.map(p => p.key).join(', ')} }) {\n${body.split('\n').map(l => '  ' + l).join('\n')}\n}`;
+
+    const outFile = f.out || `${name}.tool.json`;
+    const dsl = {
+      versionName: 'tool-v1',
+      nodes: [
+        { type: 'pluginInput', id: 'in', name: '输入', params },
+        { type: 'code', id: 'run', name: '处理', code, inputs: params.map(p => ({ key: p.key, label: p.label, value: [ 'in', p.key ], valueType: p.valueType, required: false })) },
+        { type: 'pluginOutput', id: 'out', name: '输出', from: ['run', 'system_rawResponse'] }
+      ],
+      edges: [['in', 'run'], ['run', 'out']]
+    };
+
+    // 生成即可，不强制部署
+    fs.writeFileSync(outFile, JSON.stringify(dsl, null, 2));
+    let appId;
+    if (f.deploy) {
+      appId = await client.post('/api/core/app/create', { name, type: 'plugin', avatar: 'core/app/type/workflowFill', intro: f.intro || '' });
+      dsl.appId = appId;
+      fs.writeFileSync(outFile, JSON.stringify(dsl, null, 2));
+      const lint = lintWorkflow(outFile, {});
+      if (!lint.ok) {
+        failCli('workflow_validate_failed', { hint: lint.next, details: { errors: lint.errors, issues: lint.issues } });
+      }
+      await deployWorkflow({ appId, nodes: lint.nodes, edges: lint.edges, chatConfig: lint.chatConfig, versionName: 'tool-v1', publish: true });
+      upsertTool(name, appId);
+    }
+
+    out(withNotice({
+      ok: true, name, file: outFile, params: params.map(p => p.key), deployed: !!f.deploy, appId,
+      next: f.deploy
+        ? `工具已上线：fastgpt find ${name} 可查；挂到 agent 用 pluginModule + params（见 fastgpt help wf）`
+        : `改 ${outFile} 里的 code，然后 fastgpt tool new --name ${name} --deploy --code <改好的.js> 或直接 fastgpt wf build`
+    }, {
+      type: 'tool_scaffold',
+      message: '工具骨架已生成',
+      hint: 'code 必须写成 function main({ 解构参数 })；内部变量不要与参数重名（这两条 wf lint 会拦）'
+    }));
+  },
+
   /** 清理验证过程留下的空应用/影子应用 */
   async 'clean'(args, f) {
     const list = await client.post('/api/core/app/listV2', { parentId: null, searchKey: '' });
@@ -2374,6 +2448,7 @@ const commands = {
         ],
         clean: ['clean [--confirm]  清理验证留下的空应用/影子应用'],
         find: ['find <关键词> [--type plugin|toolSet|advanced] [--limit 30]  跨目录搜应用/工具（list 只看根目录）'],
+        tool: ['new --name <名字> [--params a,b,c] [--code body.js] [--deploy]  生成工具骨架（pluginInput→code→pluginOutput）'],
         ds: [
           'permission <datasetId>                      查自己的读写/管理权限','list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
         perm: [

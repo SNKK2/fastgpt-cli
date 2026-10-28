@@ -196,6 +196,26 @@ fastgpt wf build fixed.json --dry-run
 `--inline-consts` 会把 code 节点里「`canEdit` 动态输入存常量」的情况内联进代码并删掉输入项
 （前提是代码里确实把该 key 当变量用；替换后有残留就整体放弃，不做半成品）。
 
+### 生成工具骨架：`tool new`
+
+工具（plugin）应用必须写成 `function main({ 解构参数 })`、声明 outputs、接好动态输入 —— 这三件事只在服务端 sandbox 才报错，且不告诉你是哪个节点。`tool new` 把它们固化掉：
+
+```bash
+fastgpt tool new --name dt_query --params filters,groupBy,agg --code body.js
+# → dt_query.tool.json（pluginInput → code → pluginOutput 已接好，main 已包好）
+
+fastgpt tool new --name dt_query --params filters --code body.js --deploy
+# → 直接建 plugin 应用并发布，返回 appId
+```
+
+`wf lint` 会拦这三类只在运行时才暴露的错：
+
+| 错 | 报错原文 | lint 提示 |
+|---|---|---|
+| 顶层 `return`（没有 main） | `(intermediate value)(...) is not a function` | 代码没有定义 main 函数 |
+| 内部变量与解构参数重名 | `Identifier 'groupBy' has already been declared` | 与 main 的解构参数重名，改内部变量名 |
+| 解构模式下还用 `input.xxx` | `input is not defined` | 直接用解构出来的变量名 |
+
 ### 提交 vs 落库：`wf diff`
 
 服务端保存时会跑 migration、补默认值、补异常边，**这些都不在响应里**。`wf diff` 读回对比，分五类输出：

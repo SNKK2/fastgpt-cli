@@ -437,7 +437,7 @@ const chatConfig = {
     node.start('n_start'),
     mkCode([
       { key: 'codeType', value: 'js', renderTypeList: ['select'], selectedType: 'select' },
-      { key: 'code', value: 'return 1', renderTypeList: ['custom'], selectedType: 'custom' },
+      { key: 'code', value: 'function main(){ return 1 }', renderTypeList: ['custom'], selectedType: 'custom' },
       {
         key: 'domainList',
         value: [VARIABLE_NODE_ID, 'DomainList'],
@@ -458,7 +458,7 @@ const chatConfig = {
   const nodes = [
     node.start('n_start'),
     mkCode([
-      { key: 'code', value: 'x', renderTypeList: ['custom'], selectedType: 'custom' },
+      { key: 'code', value: 'function main(){ return 1 }', renderTypeList: ['custom'], selectedType: 'custom' },
       { key: 'ghost', value: [VARIABLE_NODE_ID, 'NotExist'], selectedType: 'reference', renderTypeList: ['reference'] }
     ]),
     node.answer('n_answer', { content: 'ok' })
@@ -488,7 +488,7 @@ const chatConfig = {
   const nodes = [
     node.start('n_start'),
     mkCode([
-      { key: 'code', value: 'x', renderTypeList: ['custom'], selectedType: 'custom' },
+      { key: 'code', value: 'function main(){ return 1 }', renderTypeList: ['custom'], selectedType: 'custom' },
       { key: 'mode', value: 'domain', canEdit: true, selectedType: 'reference', renderTypeList: ['reference'] }
     ]),
     node.answer('n_answer', { content: 'ok' })
@@ -503,7 +503,7 @@ const chatConfig = {
     node.start('n_start'),
     mkCode([
       { key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null },
-      { key: 'code', value: 'x', renderTypeList: ['custom'], selectedType: 'custom' }
+      { key: 'code', value: 'function main(){ return 1 }', renderTypeList: ['custom'], selectedType: 'custom' }
     ]),
     node.answer('n_answer', { content: 'ok' })
   ];
@@ -536,7 +536,7 @@ const chatConfig = {
       headers: [{ key: 'Authorization', type: 'string', value: 'Bearer {{DomainList}}' }],
       jsonBody: '{"id":"{{DatasetId}}"}'
     }),
-    mkCode([{ key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null }, { key: 'code', value: 'x', renderTypeList: ['custom'] }]),
+    mkCode([{ key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null }, { key: 'code', value: 'function main(){ return 1 }', renderTypeList: ['custom'] }]),
     node.answer('n_answer', { content: 'ok' })
   ];
   const legacyEdges = [
