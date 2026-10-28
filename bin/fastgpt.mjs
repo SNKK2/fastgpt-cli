@@ -1662,6 +1662,46 @@ const commands = {
           ...(ctx.shadowApps.length ? { warn: `有 ${ctx.shadowApps.length} 个影子应用没清掉，跑 fastgpt clean 看清单` } : {}) });
   },
 
+  /**
+   * 跨目录搜索应用/工具。
+   * app list 只列根目录，工具通常藏在 toolFolder 里 —— 名字搜不到就等于不存在。
+   */
+  async 'find'(args, f) {
+    const kw = (args[0] || f.q || '').trim();
+    if (!kw) fail('需要关键词', '用法：fastgpt find <关键词> [--type plugin] [--limit 30]', 'fastgpt find 多维表');
+    const wantType = f.type;
+    const limit = Number(f.limit) || 30;
+    const rows = [];
+    const walk = async (parentId, depth) => {
+      for (let offset = 0; ; offset += 100) {
+        const d = await client.post('/api/core/app/listV2', { parentId, searchKey: '', pageSize: 100, offset });
+        const list = d.list || d || [];
+        if (!list.length) break;
+        for (const a of list) {
+          const hitName = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(a.name);
+          const hitType = !wantType || a.type === wantType;
+          if (hitName && hitType) rows.push({ _id: a._id, name: a.name, type: a.type, depth });
+          if (a.type === 'folder' || a.type === 'toolFolder') await walk(a._id, depth + 1);
+        }
+        if (list.length < 100) break;
+      }
+    };
+    await walk(null, 0);
+    rows.sort((a, b) => a.depth - b.depth);
+    const byType = {};
+    for (const r of rows) byType[r.type] = (byType[r.type] || 0) + 1;
+    out({
+      ok: true, keyword: kw, total: rows.length, byType,
+      results: rows.slice(0, limit),
+      ...(rows.length > limit ? { truncated: `只显示前 ${limit} 条，加 --limit 放宽` } : {}),
+      next: rows.length
+        ? (rows.find(r => ['plugin', 'toolSet', 'httpToolSet'].includes(r.type))
+            ? `看工具输入输出：fastgpt app detail ${rows.find(r => ['plugin','toolSet','httpToolSet'].includes(r.type))._id}`
+            : `看详情：fastgpt app detail ${rows[0]._id}`)
+        : `没搜到「${kw}」。试更短的关键词，或 fastgpt find "" --type plugin 列出全部工具`
+    });
+  },
+
   /** 清理验证过程留下的空应用/影子应用 */
   async 'clean'(args, f) {
     const list = await client.post('/api/core/app/listV2', { parentId: null, searchKey: '' });
@@ -2333,6 +2373,7 @@ const commands = {
           'publish <appId>'
         ],
         clean: ['clean [--confirm]  清理验证留下的空应用/影子应用'],
+        find: ['find <关键词> [--type plugin|toolSet|advanced] [--limit 30]  跨目录搜应用/工具（list 只看根目录）'],
         ds: [
           'permission <datasetId>                      查自己的读写/管理权限','list', 'create --name', 'detail <datasetId>', 'add-file <id> <file>', 'add-text <id> --name --text', 'add-link <id> <url>', 'add-batch <id> <路径...> [--ext pdf]', 'add-qa <id> --file qa.json', 'collections <id>', 'search <id> "查询词"', 'training <collectionId>', 'retrain <collectionId>', 'data <collectionId>', 'del <collectionId>', 'delete <datasetId>', 'perm <id> on|off'],
         perm: [

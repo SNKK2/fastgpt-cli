@@ -437,7 +437,7 @@ const chatConfig = {
     node.start('n_start'),
     mkCode([
       { key: 'codeType', value: 'js', renderTypeList: ['select'], selectedType: 'select' },
-      { key: 'code', value: 'return 1', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' },
+      { key: 'code', value: 'return 1', renderTypeList: ['custom'], selectedType: 'custom' },
       {
         key: 'domainList',
         value: [VARIABLE_NODE_ID, 'DomainList'],
@@ -458,7 +458,7 @@ const chatConfig = {
   const nodes = [
     node.start('n_start'),
     mkCode([
-      { key: 'code', value: 'x', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' },
+      { key: 'code', value: 'x', renderTypeList: ['custom'], selectedType: 'custom' },
       { key: 'ghost', value: [VARIABLE_NODE_ID, 'NotExist'], selectedType: 'reference', renderTypeList: ['reference'] }
     ]),
     node.answer('n_answer', { content: 'ok' })
@@ -488,7 +488,7 @@ const chatConfig = {
   const nodes = [
     node.start('n_start'),
     mkCode([
-      { key: 'code', value: 'x', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' },
+      { key: 'code', value: 'x', renderTypeList: ['custom'], selectedType: 'custom' },
       { key: 'mode', value: 'domain', canEdit: true, selectedType: 'reference', renderTypeList: ['reference'] }
     ]),
     node.answer('n_answer', { content: 'ok' })
@@ -503,7 +503,7 @@ const chatConfig = {
     node.start('n_start'),
     mkCode([
       { key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null },
-      { key: 'code', value: 'x', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' }
+      { key: 'code', value: 'x', renderTypeList: ['custom'], selectedType: 'custom' }
     ]),
     node.answer('n_answer', { content: 'ok' })
   ];
@@ -536,7 +536,7 @@ const chatConfig = {
       headers: [{ key: 'Authorization', type: 'string', value: 'Bearer {{DomainList}}' }],
       jsonBody: '{"id":"{{DatasetId}}"}'
     }),
-    mkCode([{ key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null }, { key: 'code', value: 'x', renderTypeList: ['codeEditor'] }]),
+    mkCode([{ key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null }, { key: 'code', value: 'x', renderTypeList: ['custom'] }]),
     node.answer('n_answer', { content: 'ok' })
   ];
   const legacyEdges = [
@@ -549,6 +549,22 @@ const chatConfig = {
   ok('规范化修掉 handle', fixed.fixes.some(f => /handle 形态过旧/.test(f.reason)));
   ok('规范化修掉裸变量', fixed.edges.length === 3 && JSON.stringify(fixed.nodes).includes('{{$VARIABLE_NODE_ID.DatasetId$}}'));
   ok('规范化后校验通过', v.ok, JSON.stringify(v.errors));
+}
+
+// 工具挂载边（selectedTools）不能被规范化改写
+{
+  const nodes = [
+    node.start('n_start'),
+    node.toolCall('n_agent', { modelId: '6a997b9fedaae05e18a0a4d3', question: ['n_start', 'userChatInput'] }),
+    node.pluginModule('n_tool', { appId: 'aaaaaaaaaaaaaaaaaaaaaaaa' })
+  ];
+  const edges = [
+    edge('n_start', 'n_agent'),
+    { source: 'n_agent', sourceHandle: 'selectedTools', target: 'n_tool', targetHandle: 'selectedTools' }
+  ];
+  const fixed = normalizeWorkflow({ nodes, edges, chatConfig: {} });
+  const toolEdge = fixed.edges.find(e => e.source === 'n_agent' && e.target === 'n_tool');
+  ok('selectedTools 边保持原样', toolEdge.sourceHandle === 'selectedTools' && toolEdge.targetHandle === 'selectedTools');
 }
 
 // ---------- 输出 ----------
