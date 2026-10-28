@@ -46,7 +46,7 @@ description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI �
 | `system_addInputParam.value = null` | 动态输入表格按数组处理，渲染异常 | `[]` |
 | `ifElseList[].list[].value = true` | 「输入项 ifElseList 不符合字段结构约束」 | 布尔存字符串 `"true"` |
 
-`wf lint` 全会报，`wf build` 会先尝试自动修。对应字段：`issues[].code`（
+`wf lint` 全会报，`wf build` 会先尝试自动修；`canedit_const_value` 这类要加 `--inline-consts` 才自动内联（默认关，属内容级修改）。对应字段：`issues[].code`（
 `bare_variable_ref` / `canedit_const_value` / `addinputparam_null` / `ifelse_value_type` / `handle_legacy_port`），
 `issues[].fix` 为 `auto` 的跑一次 `wf lint --fix` 就没了，`manual` 的必须改内容。
 

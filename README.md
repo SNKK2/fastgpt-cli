@@ -159,9 +159,34 @@ fastgpt wf build wf.json
 `wf lint` 先做规范化再校验：能自动修的（handle、裸变量、null、ifElse 值）直接修好并列在 `autoFixed`，修不掉的（canEdit 常量）才报 error。`--fix` 会把规范化结果写成可直接喂 `wf build` 的文件。
 
 ```bash
-fastgpt wf lint export.json --fix fixed.json   # 41 项自动修复，剩 24 项要人决策
+fastgpt wf lint export.json --fix fixed.json --inline-consts   # 65 项自动修复，0 error
 fastgpt wf build fixed.json --dry-run
 ```
+
+`--inline-consts` 会把 code 节点里「`canEdit` 动态输入存常量」的情况内联进代码并删掉输入项
+（前提是代码里确实把该 key 当变量用；替换后有残留就整体放弃，不做半成品）。
+
+### 提交 vs 落库：`wf diff`
+
+服务端保存时会跑 migration、补默认值、补异常边，**这些都不在响应里**。`wf diff` 读回对比，分五类输出：
+
+```bash
+fastgpt wf diff <appId> <file>
+```
+
+```json
+{
+  "verdict": "clean | server_normalized | data_loss",
+  "added": [], "removed": [], "injected": [], "stripped": [], "changed": [],
+  "whitelisted": [{ "code": "catch_edge_added", "count": 11, "samples": [] }]
+}
+```
+
+- `stripped` / `removed` 非空 → `data_loss`，你的配置被丢了，必须合并回本地文件
+- 已知无害项自动折叠成白名单计数：`agentGenerated` 注入、`selectedType` 默认填充、`catchError` 默认值、服务端补的 catch 边、变量 `renderTypeList` 被 strip
+
+**注意顺序**：编辑器一打开前端就 autoSave。所以「部署 → diff → 开 UI 校验」之后必须**再 diff 一次**，
+最终以「前端写回后的落库形态」为准。
 
 ### 运行验证
 

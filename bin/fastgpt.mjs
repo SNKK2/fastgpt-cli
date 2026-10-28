@@ -10,6 +10,7 @@ import { mergeCollaboratorList, updateCollaborators, RESOURCES } from '../lib/co
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
 import { edge, chain, validateWorkflow, normalizeWorkflow, VARIABLE_NODE_ID } from '../lib/validate.mjs';
+import { diffWorkflow } from '../lib/diff.mjs';
 
 const out = o => console.log(JSON.stringify(o, null, 2));
 
@@ -1056,7 +1057,7 @@ const commands = {
     let { nodes, edges, chatConfig } = built;
 
     // 规范化：把「能跑但前端不认」的写法修掉（handle 形态、裸变量、null 动态输入、ifElse 值类型）
-    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+    const normalized = normalizeWorkflow({ nodes, edges, chatConfig, inlineConstInputs: !!f['inline-consts'] });
     if (normalized.fixes.length) {
       console.error('');
       console.error('🔧 已自动规范化（这些写法服务端能跑，但前端/画布不认）：');
@@ -1161,7 +1162,7 @@ const commands = {
 
     // 先规范化再校验：把「服务端能跑但前端不认」的写法自动修掉，剩下的才是真问题。
     // --fix <out.json> 会把修好的完整结构写出来，可直接喂 wf build。
-    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+    const normalized = normalizeWorkflow({ nodes, edges, chatConfig, inlineConstInputs: !!f['inline-consts'] });
     nodes = normalized.nodes; edges = normalized.edges;
 
     const v = validateWorkflow({ nodes, edges, chatConfig });
@@ -1228,6 +1229,65 @@ const commands = {
       { ok: true, appId },
       type === 'plugin' ? Notice.pluginPublished(appId) : Notice.appCreated(appId)
     ));
+  },
+
+  /**
+   * 提交 vs 落库：服务端 migration 到底改了你什么。
+   * 服务端保存时会迁移结构、补默认值、补异常边，这些都不在响应里 —— 只能读回比。
+   * 用法：wf diff <appId> <file>
+   */
+  async 'wf diff'(args, f) {
+    const appId = f.appId || args[0];
+    const file = f.file || args[1];
+    if (!appId) fail('需要 appId');
+    if (!file) fail('需要 workflow 文件（DSL 或原生导出 JSON）');
+
+    let nodes, edges, chatConfig;
+    try { ({ nodes, edges, chatConfig } = buildFromDsl(readJson(file))); } catch (e) { fail(e.message); }
+    // 与 build 对齐：先规范化，否则会把「我们会自动修的」误报成服务端改动
+    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+
+    const stored = await client.get(`/api/core/app/detail?appId=${appId}`);
+    const diff = diffWorkflow({
+      submitted: { nodes: normalized.nodes, edges: normalized.edges, chatConfig },
+      stored: { nodes: stored.nodes || [], edges: stored.edges || [], chatConfig: stored.chatConfig || {} }
+    });
+
+    const significant = diff.added.length + diff.removed.length + diff.injected.length + diff.stripped.length + diff.changed.length;
+    out(withNotice(
+      {
+        ok: diff.stripped.length === 0 && diff.removed.length === 0,
+        appId,
+        file,
+        comparedAgainst: 'app.nodes（草稿，UI 实际显示的）',
+        verdict: diff.verdict,
+        counts: {
+          added: diff.added.length,
+          removed: diff.removed.length,
+          injected: diff.injected.length,
+          stripped: diff.stripped.length,
+          changed: diff.changed.length,
+          whitelisted: diff.whitelistedCount
+        },
+        added: diff.added,
+        removed: diff.removed,
+        injected: diff.injected,
+        stripped: diff.stripped,
+        changed: diff.changed,
+        whitelisted: diff.whitelisted,
+        next: significant === 0
+          ? '提交与落库一致，本地文件可以作为 source of truth'
+          : diff.verdict === 'data_loss'
+            ? '有字段/节点没落库（被 schema strip 或被 migration 丢弃），后续编辑会丢配置：先合并进本地文件再继续'
+            : '服务端做了规范化（非破坏）。落库形态才是真的，二次编辑请基于 wf get 的结果'
+      },
+      diff.verdict === 'data_loss' ? {
+        type: 'data_loss',
+        message: '提交的内容有丢失（stripped/removed 非空）',
+        hint: '把 stripped/removed 里的项合并回本地文件；落库形态才是 source of truth'
+      } : null
+    ));
+    if (diff.verdict === 'data_loss') process.exit(2);
   },
 
   /** 草稿 / 版本层一致性：判断「我改的东西到底写进哪一层了」 */
@@ -1873,6 +1933,7 @@ const commands = {
           'validate <json>                同 lint（含自动规范化报告 autoFixed）',
           "check-run <appId> [-q] [--variables '{}'] 运行时体检：真跑一次，摊开每节点入参与未替换变量",
           'versions <appId>               草稿 / version/latest / 各版本指纹对比（判断改动写进哪一层）',
+          'diff <appId> <file>            提交 vs 落库分类对比：服务端 migration 改了/丢了什么',
           'get <appId> [--out f]',
           'publish <appId>'
         ],
