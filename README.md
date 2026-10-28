@@ -146,6 +146,23 @@ fastgpt wf build wf.json --dry-run
 fastgpt wf build wf.json
 ```
 
+### 部署后三层检测（v0.2.0 起内建）
+
+工作流的坑分三层，**每层都会骗过另外两层**，必须各测一次：
+
+| 层 | 命令 | 抓什么 |
+|---|---|---|
+| 静态 | `fastgpt wf lint <file> [--fix out.json]` | handle 形态、裸变量占位、canEdit 常量、null 动态输入、ifElse 值类型、引用不可解析 |
+| 运行时 | `fastgpt wf check-run <appId> --variables '{...}'` | 真跑一次，摊开每个 HTTP 节点的 `headers`/`body`，抓「变量没替换」 |
+| 版本 | `fastgpt wf versions <appId>` | 草稿 / `version/latest` / 各版本指纹，判断改动写进哪一层 |
+
+`wf lint` 先做规范化再校验：能自动修的（handle、裸变量、null、ifElse 值）直接修好并列在 `autoFixed`，修不掉的（canEdit 常量）才报 error。`--fix` 会把规范化结果写成可直接喂 `wf build` 的文件。
+
+```bash
+fastgpt wf lint export.json --fix fixed.json   # 41 项自动修复，剩 24 项要人决策
+fastgpt wf build fixed.json --dry-run
+```
+
 ### 运行验证
 
 ```bash

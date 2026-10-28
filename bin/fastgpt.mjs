@@ -9,7 +9,7 @@ import { setBlock, getBlock, clearBlock, blockEnvelope } from '../lib/blocker.mj
 import { mergeCollaboratorList, updateCollaborators, RESOURCES } from '../lib/collaborators.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
 import { node, input, REF } from '../lib/nodes.mjs';
-import { edge, chain, validateWorkflow } from '../lib/validate.mjs';
+import { edge, chain, validateWorkflow, normalizeWorkflow, VARIABLE_NODE_ID } from '../lib/validate.mjs';
 
 const out = o => console.log(JSON.stringify(o, null, 2));
 
@@ -270,8 +270,18 @@ function autoTuneNodeParams(nodes) {
 
 // ---------- DSL 构建（wf build / wf validate 共用） ----------
 function buildFromDsl(dsl) {
+  // 原生导出格式（FastGPT 工作流 JSON 直接导出）：节点本身就有 nodeId/flowNodeType，没有 type。
+  // 以前只有 wf lint / wf validate 兼容，wf build 会抛「未知节点类型: undefined」，导致只能手改 JSON。
+  const rawNodes = dsl.nodes || [];
+  if (!rawNodes.some(n => n.type) && rawNodes.length) {
+    const nodes = structuredClone(rawNodes);
+    const edges = (dsl.edges || []).map(e => Array.isArray(e) ? edge(e[0], e[1], e[2]) : e);
+    const chatConfig = dsl.chatConfig || { variables: [], entryPoints: [] };
+    return { nodes, edges, chatConfig, native: true };
+  }
+
   const nodes = [];
-  for (const spec of dsl.nodes || []) {
+  for (const spec of rawNodes) {
     const fn = node[spec.type];
     if (!fn) throw new Error(`未知节点类型: ${spec.type}，可用: ${Object.keys(node).join(', ')}`);
     const { type, ...opts } = spec;
@@ -1045,6 +1055,20 @@ const commands = {
     try { built = buildFromDsl(dsl); } catch (e) { fail(e.message); }
     let { nodes, edges, chatConfig } = built;
 
+    // 规范化：把「能跑但前端不认」的写法修掉（handle 形态、裸变量、null 动态输入、ifElse 值类型）
+    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+    if (normalized.fixes.length) {
+      console.error('');
+      console.error('🔧 已自动规范化（这些写法服务端能跑，但前端/画布不认）：');
+      normalized.fixes.forEach(x => {
+        console.error(`   ${x.where}: ${x.from} → ${x.to}`);
+        console.error(`     ${x.reason}`);
+      });
+      console.error('');
+      nodes = normalized.nodes;
+      edges = normalized.edges;
+    }
+
     // 内在参数自动调整（在 modelId 预检之前，避免给出基于错误参数的结论）
     const tuned = autoTuneNodeParams(nodes);
     if (tuned.length) {
@@ -1065,7 +1089,16 @@ const commands = {
 
     const v = validateWorkflow({ nodes, edges, chatConfig });
     if (!v.ok) {
-      failCli('workflow_validate_failed', { details: { errors: v.errors, warnings: v.warnings } });
+      failCli('workflow_validate_failed', {
+        hint: v.next,
+        details: {
+          errors: v.errors,
+          warnings: v.warnings,
+          issues: v.issues,
+          autoFixable: v.issues.filter(i => i.fix === 'auto').length,
+          manualFixRequired: v.issues.filter(i => i.fix !== 'auto').length
+        }
+      });
     }
 
     if (f['dry-run']) {
@@ -1124,12 +1157,13 @@ const commands = {
     if (!file) fail('需要 JSON 文件路径');
     const d = readJson(file);
     let nodes, edges, chatConfig;
-    if ((d.nodes || []).some(n => n.type)) {
-      try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); }
-      catch (e) { fail(e.message); }
-    } else {
-      nodes = d.nodes || d; edges = d.edges || []; chatConfig = d.chatConfig || {};
-    }
+    try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); } catch (e) { fail(e.message); }
+
+    // 先规范化再校验：把「服务端能跑但前端不认」的写法自动修掉，剩下的才是真问题。
+    // --fix <out.json> 会把修好的完整结构写出来，可直接喂 wf build。
+    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+    nodes = normalized.nodes; edges = normalized.edges;
+
     const v = validateWorkflow({ nodes, edges, chatConfig });
     const placeholder = [];
     for (const n of nodes) {
@@ -1139,18 +1173,24 @@ const commands = {
         }
       }
     }
+    if (f.fix) {
+      fs.writeFileSync(f.fix, JSON.stringify({ nodes, edges, chatConfig }, null, 2));
+    }
     out({
       ok: v.ok,
       lintOnly: true,
-      note: '仅语法检查，未验证 modelId / datasetId 真实性，不代表可部署',
+      note: '仅语法 + 渲染契约检查，未验证 modelId / datasetId 真实性，不代表可部署',
       nodes: nodes.length,
       edges: edges.length,
+      autoFixed: normalized.fixes,
       errors: v.errors,
       warnings: v.warnings,
+      issues: v.issues,
       ...(placeholder.length ? { unresolvedModelIds: placeholder } : {}),
+      ...(f.fix ? { fixedFile: f.fix } : {}),
       next: v.ok
-        ? '语法没问题。真实部署用 fastgpt wf build <file>（需要登录）'
-        : '先修正 errors，再运行 fastgpt wf build'
+        ? (f.fix ? `已写出规范化结果 ${f.fix}，可直接 fastgpt wf build ${f.fix}` : '语法没问题。真实部署用 fastgpt wf build <file>（需要登录）')
+        : (v.next || '先修正 errors，再运行 fastgpt wf build')
     });
     if (!v.ok) process.exit(2);
   },
@@ -1159,16 +1199,13 @@ const commands = {
     const file = f.file || args[0];
     if (!file) fail('需要 JSON 文件路径');
     const d = readJson(file);
-    // 兼容两种输入：DSL（节点带 type）或已构建的完整结构
+    // 两种输入都吃：DSL（节点带 type）或 FastGPT 原生导出（节点带 nodeId/flowNodeType）
     let nodes, edges, chatConfig;
-    if ((d.nodes || []).some(n => n.type)) {
-      try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); }
-      catch (e) { fail(e.message); }
-    } else {
-      nodes = d.nodes || d; edges = d.edges || []; chatConfig = d.chatConfig || {};
-    }
-    const v = validateWorkflow({ nodes, edges, chatConfig });
-    v.nodeCount = nodes.length; v.edgeCount = edges.length;
+    try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); } catch (e) { fail(e.message); }
+    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+    const v = validateWorkflow(normalized);
+    v.nodeCount = normalized.nodes.length; v.edgeCount = normalized.edges.length;
+    v.autoFixed = normalized.fixes;
     out(v); if (!v.ok) process.exit(2);
   },
 
@@ -1191,6 +1228,97 @@ const commands = {
       { ok: true, appId },
       type === 'plugin' ? Notice.pluginPublished(appId) : Notice.appCreated(appId)
     ));
+  },
+
+  /** 草稿 / 版本层一致性：判断「我改的东西到底写进哪一层了」 */
+  async 'wf versions'(args, f) {
+    const appId = f.appId || args[0];
+    if (!appId) fail('需要 appId');
+    const fp = nodes => {
+      const sig = (nodes || []).map(n => `${n.nodeId}:${(n.inputs || []).map(i => i.key).join('|')}`).join('\n');
+      let h = 0;
+      for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) | 0;
+      return { nodes: (nodes || []).length, hash: (h >>> 0).toString(16) };
+    };
+    const draft = await client.get(`/api/core/app/detail?appId=${appId}`);
+    const latest = await client.get(`/api/core/app/version/latest?appId=${appId}`);
+    const list = await client.post('/api/core/app/version/list', { appId, offset: 0, pageSize: f.count || 5 });
+    const rows = [
+      { layer: 'draft(app.nodes)', id: draft._id, time: draft.updateTime, fp: fp(draft.nodes), publishedVersionId: draft.publishedVersionId },
+      { layer: 'version/latest', id: latest._id, name: latest.versionName, fp: fp(latest.nodes) }
+    ];
+    for (const v of (list.list || list)) {
+      const d = await client.get(`/api/core/app/version/detail?appId=${appId}&versionId=${v._id}`).catch(() => ({ nodes: [] }));
+      rows.push({ layer: v.isPublish ? 'version(published)' : 'version(draft)', id: v._id, name: v.versionName, time: v.time, fp: fp(d.nodes) });
+    }
+    const published = rows.find(r => r.layer === 'version(published)');
+    out({
+      ok: true,
+      appId,
+      rows,
+      consistent: published ? draft && fp(draft.nodes).hash === published.fp.hash : null,
+      note: 'OpenAPI 跑发布版本，UI 看草稿。编辑器一打开前端会 autoSave 覆盖草稿，两者不一致时先 publish 再判断。'
+    });
+  },
+
+  /**
+   * 运行时体检：真跑一次 OpenAPI，把每个节点的实际入参摊开。
+   * 静态 JSON 里有引用 ≠ 运行时真的替换成功；这一层专门抓「变量没替换」。
+   */
+  async 'wf check-run'(args, f) {
+    const appId = f.appId || args[0];
+    if (!appId) fail('需要 appId');
+    const keyFile = f.keyFile || '.fastgpt/apikey';
+    const key = f.key || process.env.FASTGPT_APP_KEY || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : '');
+    if (!key) fail('缺少 API Key：先 fastgpt apikey create --name cli，或传 --key');
+    let variables;
+    if (f.variables) {
+      try { variables = JSON.parse(f.variables); } catch { fail('--variables 需要 JSON 字符串'); }
+    }
+    const res = await fetch(`${client.base}/api/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        appId, chatId: f.chatId || `cli-${Date.now()}`, stream: false, detail: true,
+        variables, messages: [{ role: 'user', content: f.q || 'hello' }]
+      })
+    });
+    const raw = await res.text();
+    if (!res.ok) fail(`对话接口返回 ${res.status}: ${raw.slice(0, 200)}`);
+    const json = JSON.parse(raw);
+    const content = json.choices?.[0]?.message?.content ?? '';
+    let contract;
+    try { contract = JSON.parse(content); } catch { /* 非 JSON 输出 */ }
+    const trace = (json.responseData || []).map(n => {
+      const flat = JSON.stringify({ body: n.body, headers: n.headers });
+      return {
+        node: n.nodeId || n.moduleName,
+        type: n.moduleType,
+        httpCode: n.httpResult?.code,
+        total: n.httpResult?.data?.total,
+        body: n.body,
+        headers: n.headers,
+        unresolved: [...new Set([...flat.matchAll(/\{\{[^}]{0,60}\}\}/g)].map(m => m[0]))]
+      };
+    });
+    const bad = trace.filter(t => t.unresolved.length);
+    out(withNotice({
+      ok: bad.length === 0,
+      appId,
+      contentLength: content.length,
+      outputIsJson: !!contract,
+      Status: contract?.Status,
+      DataSetDate: contract?.DataSetDate,
+      domains: contract?.DomainList?.map(d => ({ name: d.name, terms: d.termlist?.length ?? 0 })),
+      Error: contract?.Error?.length ? contract.Error : undefined,
+      unresolvedVariables: bad,
+      trace: trace.filter(t => t.type === 'httpRequest468' || t.body || t.headers)
+    }, bad.length ? {
+      type: 'unresolved_variable',
+      message: '运行时有变量没被替换，值里残留 {{...}}',
+      hint: '检查该节点的输入是否引用了未定义/未传值的全局变量；wf lint 能提前发现裸占位 {{key}}'
+    } : null));
+    if (bad.length) process.exit(2);
   },
 
   // ===== 知识库 =====
@@ -1740,9 +1868,11 @@ const commands = {
         model: ['list [--type llm]', 'id  （从已有应用提取 modelId）'],
         app: ['list', 'create --name --type', 'detail <appId>', 'share create --appId --name --type share|iframe|apikey', 'share list --appId', 'share delete <_id>'],
         wf: [
-          'build <dsl.json> [--dry-run]   需要登录，dry-run 也验证真实 ID',
-          'lint <dsl.json>                纯语法检查（离线，不代表可部署）',
-          'validate <json>                同 lint',
+          'build <dsl.json|原生导出.json> [--dry-run]   需要登录；构建前自动规范化 handle/裸变量/null 动态输入',
+          'lint <file> [--fix out.json]   离线：语法 + 渲染契约检查；--fix 写出规范化结果，可直接喂 build',
+          'validate <json>                同 lint（含自动规范化报告 autoFixed）',
+          "check-run <appId> [-q] [--variables '{}'] 运行时体检：真跑一次，摊开每节点入参与未替换变量",
+          'versions <appId>               草稿 / version/latest / 各版本指纹对比（判断改动写进哪一层）',
           'get <appId> [--out f]',
           'publish <appId>'
         ],

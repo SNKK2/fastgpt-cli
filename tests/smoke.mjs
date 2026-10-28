@@ -1,7 +1,7 @@
 // 离线回归测试：不触网，验证构造器、校验规则、错误契约
 // 运行: node tests/smoke.mjs
 import { node, VARP, REF } from '../lib/nodes.mjs';
-import { validateWorkflow, edge, chain } from '../lib/validate.mjs';
+import { validateWorkflow, normalizeWorkflow, edge, chain, VARIABLE_NODE_ID } from '../lib/validate.mjs';
 import { cliError, BASE_PRESETS, WEBSITE_TO_PRESET, Notice, withNotice, exitCodeFor } from '../lib/errors.mjs';
 import { blockEnvelope } from '../lib/blocker.mjs';
 import { mergeCollaboratorList, RESOURCES } from '../lib/collaborators.mjs';
@@ -412,6 +412,143 @@ section('协作者完整列表语义');
   ok('dataset idKey 是 datasetId', RESOURCES.dataset.idKey === 'datasetId');
   ok('collection idKey 是 collectionId', RESOURCES.collection.idKey === 'collectionId');
   ok('app idKey 是 appId', RESOURCES.app.idKey === 'appId');
+}
+
+// ---------- 渲染契约（线上踩过的坑，逐条回归） ----------
+section('渲染契约：前端不认但服务端能跑的写法');
+
+const mkCode = (inputs, id = 'n_code') => ({
+  nodeId: id,
+  flowNodeType: 'code',
+  name: '代码运行',
+  inputs,
+  outputs: [{ id: 'system_rawResponse', key: 'system_rawResponse', label: '完整响应', type: 'static', valueType: 'object' }]
+});
+const chatConfig = {
+  variables: [
+    { key: 'DatasetId', label: 'DatasetId', type: 'internal', valueType: 'string' },
+    { key: 'DomainList', label: 'DomainList', type: 'input', valueType: 'string' }
+  ]
+};
+
+// 全局变量引用必须被当成合法引用，不能被判成「引用了不存在的节点」
+{
+  const nodes = [
+    node.start('n_start'),
+    mkCode([
+      { key: 'codeType', value: 'js', renderTypeList: ['select'], selectedType: 'select' },
+      { key: 'code', value: 'return 1', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' },
+      {
+        key: 'domainList',
+        value: [VARIABLE_NODE_ID, 'DomainList'],
+        selectedType: 'reference',
+        renderTypeList: ['reference'],
+        valueType: 'string'
+      }
+    ]),
+    node.answer('n_answer', { content: 'ok' })
+  ];
+  const edges = chain(['n_start', 'n_code', 'n_answer']);
+  const v = validateWorkflow({ nodes, edges, chatConfig });
+  ok('VARIABLE_NODE_ID 引用通过校验', v.ok, JSON.stringify(v.errors));
+}
+
+// 未定义的全局变量仍要报错
+{
+  const nodes = [
+    node.start('n_start'),
+    mkCode([
+      { key: 'code', value: 'x', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' },
+      { key: 'ghost', value: [VARIABLE_NODE_ID, 'NotExist'], selectedType: 'reference', renderTypeList: ['reference'] }
+    ]),
+    node.answer('n_answer', { content: 'ok' })
+  ];
+  const v = validateWorkflow({ nodes, edges: chain(['n_start', 'n_code', 'n_answer']), chatConfig });
+  ok('未定义的全局变量报错', !v.ok && v.errors.some(e => /未定义的全局变量 NotExist/.test(e)), JSON.stringify(v.errors));
+}
+
+// 裸变量占位必须报错（服务端能替换，前端不渲染成引用）
+{
+  const nodes = [
+    node.start('n_start'),
+    node.http('n_http', {
+      url: 'https://example.com',
+      method: 'POST',
+      headers: [{ key: 'Authorization', type: 'string', value: 'Bearer {{DomainList}}' }],
+      jsonBody: '{"id":"{{DatasetId}}"}'
+    }),
+    node.answer('n_answer', { content: 'ok' })
+  ];
+  const v = validateWorkflow({ nodes, edges: chain(['n_start', 'n_http', 'n_answer']), chatConfig });
+  ok('裸变量占位报错', !v.ok && v.errors.filter(e => /裸变量占位/.test(e)).length === 2, JSON.stringify(v.errors));
+}
+
+// canEdit 动态输入存常量必须报错
+{
+  const nodes = [
+    node.start('n_start'),
+    mkCode([
+      { key: 'code', value: 'x', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' },
+      { key: 'mode', value: 'domain', canEdit: true, selectedType: 'reference', renderTypeList: ['reference'] }
+    ]),
+    node.answer('n_answer', { content: 'ok' })
+  ];
+  const v = validateWorkflow({ nodes, edges: chain(['n_start', 'n_code', 'n_answer']), chatConfig });
+  ok('canEdit 常量报错', !v.ok && v.errors.some(e => /canEdit 动态输入/.test(e)), JSON.stringify(v.errors));
+}
+
+// system_addInputParam 为 null 必须报错
+{
+  const nodes = [
+    node.start('n_start'),
+    mkCode([
+      { key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null },
+      { key: 'code', value: 'x', renderTypeList: ['codeEditor'], selectedType: 'codeEditor' }
+    ]),
+    node.answer('n_answer', { content: 'ok' })
+  ];
+  const v = validateWorkflow({ nodes, edges: chain(['n_start', 'n_code', 'n_answer']), chatConfig });
+  ok('addInputParam 为 null 报错', !v.ok && v.errors.some(e => /system_addInputParam 的 value 是 null/.test(e)));
+}
+
+// ifElse 分支 handle 必须放行，value 必须是字符串
+{
+  const ifElseNode = node.ifElse('n_if', {
+    conditions: [{ branchId: 'yes', condition: 'AND', list: [{ variable: ['n_start', 'userChatInput'], condition: 'equalTo', value: true, valueType: 'input' }] }]
+  });
+  const nodes = [node.start('n_start'), ifElseNode, node.answer('n_a', { content: '1' }), node.answer('n_b', { content: '2' })];
+  const edges = [
+    edge('n_start', 'n_if'),
+    edge('n_if', 'n_a', 'yes'),
+    edge('n_if', 'n_b', 'ELSE')
+  ];
+  const v = validateWorkflow({ nodes, edges, chatConfig });
+  ok('ifElse 分支 handle 放行', !v.errors.some(e => /sourceHandle/.test(e)), JSON.stringify(v.errors));
+  ok('ifElse 布尔 value 报错', v.errors.some(e => /ifElseList/.test(e)), JSON.stringify(v.errors));
+}
+
+// 规范化：handle / 裸变量 / null / ifElse 值一次修好
+{
+  const nodes = [
+    node.start('n_start'),
+    node.http('n_http', {
+      url: 'https://example.com',
+      headers: [{ key: 'Authorization', type: 'string', value: 'Bearer {{DomainList}}' }],
+      jsonBody: '{"id":"{{DatasetId}}"}'
+    }),
+    mkCode([{ key: 'system_addInputParam', renderTypeList: ['addInputParam'], value: null }, { key: 'code', value: 'x', renderTypeList: ['codeEditor'] }]),
+    node.answer('n_answer', { content: 'ok' })
+  ];
+  const legacyEdges = [
+    { source: 'n_start', sourceHandle: 'n_start-source-userChatInput', target: 'n_http', targetHandle: 'n_http-target-httpReqUrl' },
+    { source: 'n_http', sourceHandle: 'n_http-source-httpRawResponse', target: 'n_code', targetHandle: 'n_code-target-collectionData' },
+    { source: 'n_code', sourceHandle: 'n_code-source-system_rawResponse', target: 'n_answer', targetHandle: 'n_answer-target-text' }
+  ];
+  const fixed = normalizeWorkflow({ nodes, edges: legacyEdges, chatConfig });
+  const v = validateWorkflow({ nodes: fixed.nodes, edges: fixed.edges, chatConfig });
+  ok('规范化修掉 handle', fixed.fixes.some(f => /handle 形态过旧/.test(f.reason)));
+  ok('规范化修掉裸变量', fixed.edges.length === 3 && JSON.stringify(fixed.nodes).includes('{{$VARIABLE_NODE_ID.DatasetId$}}'));
+  ok('规范化后校验通过', v.ok, JSON.stringify(v.errors));
 }
 
 // ---------- 输出 ----------
