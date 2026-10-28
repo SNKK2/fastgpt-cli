@@ -8,8 +8,8 @@ import { cliError, exitCodeFor, isCliError, BASE_PRESETS, WEBSITE_TO_PRESET, Not
 import { setBlock, getBlock, clearBlock, blockEnvelope } from '../lib/blocker.mjs';
 import { mergeCollaboratorList, updateCollaborators, RESOURCES } from '../lib/collaborators.mjs';
 import { ensureAuth, scanLogin, resumeScan, passwordLogin, checkAuth, isAuthError } from '../lib/auth.mjs';
-import { node, input, REF } from '../lib/nodes.mjs';
-import { edge, chain, validateWorkflow, normalizeWorkflow, VARIABLE_NODE_ID } from '../lib/validate.mjs';
+import { node } from '../lib/nodes.mjs';
+import { edge, validateWorkflow, normalizeWorkflow } from '../lib/validate.mjs';
 import { diffWorkflow } from '../lib/diff.mjs';
 
 const out = o => console.log(JSON.stringify(o, null, 2));
@@ -74,41 +74,6 @@ async function scanModelIds() {
 }
 
 /** 纯静态检查：不触网，只列出问题，不阻断 */
-function staticModelIdCheck(nodes) {
-  const isPlaceholder = v => typeof v === 'string' && (/^\s*$/.test(v) || /^<.*>$/.test(v));
-  const issues = [];
-  for (const n of nodes) {
-    for (const inp of n.inputs || []) {
-      if (inp.key !== 'modelId') continue;
-      const v = inp.value;
-      if (Array.isArray(v)) continue;
-      if (typeof v === 'string' && MODEL_ID_RE.test(v)) {
-        if (/^0+$/.test(v)) issues.push({ node: n.nodeId, value: v, kind: 'suspicious-zero' });
-        continue;
-      }
-      if (isPlaceholder(v)) issues.push({ node: n.nodeId, value: v, kind: 'placeholder' });
-      else issues.push({ node: n.nodeId, value: v, kind: 'model-name' });
-    }
-  }
-  if (!issues.length) return true;
-  const ph = issues.filter(i => i.kind === 'placeholder');
-  const nm = issues.filter(i => i.kind === 'model-name');
-  const zr = issues.filter(i => i.kind === 'suspicious-zero');
-  console.error('');
-  if (ph.length) {
-    console.error(`⚠️  ${ph.length} 处 modelId 仍是占位符：${[...new Set(ph.map(i => i.value))].join(', ')}`);
-  }
-  if (nm.length) {
-    console.error(`⚠️  ${nm.length} 处 modelId 填的是模型名：${[...new Set(nm.map(i => i.value))].join(', ')}`);
-  }
-  if (zr.length) {
-    console.error(`❌ ${zr.length} 处 modelId 是全零假值（${zr[0].value}），这不是真实模型，部署后必然失败`);
-  }
-  console.error('   dry-run 只校验结构，不做网络检查。真实部署前请运行：fastgpt model id');
-  console.error('');
-  return !zr.length;
-}
-
 /**
  * 真实部署前的 modelId 检查（会触网）。
  *   有候选 → 自动填充或校验
@@ -267,6 +232,127 @@ function autoTuneNodeParams(nodes) {
   }
 
   return changes;
+}
+
+// ---------- 共用管道：读文件 → 构建 → 规范化 → 校验 ----------
+// 之前 wf lint / wf validate / wf build / wf diff 各自抄了一遍这三段式，语义容易漂。
+// 现在统一走 loadWorkflow + lintWorkflow，命令只负责输出与退出码。
+
+/** 读文件 → DSL/原生构建 → 规范化。返回可直接提交的结构 + 自动修复清单。 */
+function loadWorkflow(file, flags = {}) {
+  const d = readJson(file);
+  let built;
+  try { built = buildFromDsl(d); } catch (e) { fail(e.message); }
+  const normalized = normalizeWorkflow({
+    nodes: built.nodes, edges: built.edges, chatConfig: built.chatConfig,
+    inlineConstInputs: !!flags['inline-consts']
+  });
+  return {
+    raw: d,
+    nodes: normalized.nodes,
+    edges: normalized.edges,
+    chatConfig: built.chatConfig,
+    fixes: normalized.fixes,
+    native: !!built.native
+  };
+}
+
+/** 规范化后校验，附带 modelId 占位符检查。离线可用（不触网）。 */
+function lintWorkflow(file, flags = {}) {
+  const wf = loadWorkflow(file, flags);
+  const v = validateWorkflow({ nodes: wf.nodes, edges: wf.edges, chatConfig: wf.chatConfig });
+  const unresolvedModelIds = [];
+  for (const n of wf.nodes) {
+    for (const inp of n.inputs || []) {
+      if (inp.key === 'modelId' && typeof inp.value === 'string' && !/^[0-9a-f]{24}$/i.test(inp.value)) {
+        unresolvedModelIds.push({ node: n.nodeId, value: inp.value });
+      }
+    }
+  }
+  return {
+    ...wf,
+    ok: v.ok,
+    errors: v.errors,
+    warnings: v.warnings,
+    issues: v.issues,
+    next: v.next,
+    unresolvedModelIds,
+    autoFixable: v.issues.filter(i => i.fix === 'auto').length,
+    manualFixRequired: v.issues.filter(i => i.fix !== 'auto').length
+  };
+}
+
+/** 提交（草稿或发布）。返回服务端结果，不做 out。 */
+async function deployWorkflow({ appId, nodes, edges, chatConfig, versionName, publish = true }) {
+  await client.post(`/api/core/app/version/publish?appId=${appId}`, {
+    nodes, edges, chatConfig,
+    isPublish: publish, autoSave: !publish,
+    versionName: versionName || 'v1'
+  });
+  return { appId };
+}
+
+/** dry-run 的 ID 真实性检查：datasetId 必须存在于当前团队 */
+async function verifyResourceIds(nodes) {
+  const dsIds = new Set();
+  for (const n of nodes) {
+    for (const inp of n.inputs || []) {
+      if (inp.key !== 'datasets' || !Array.isArray(inp.value)) continue;
+      for (const d of inp.value) {
+        if (d && typeof d === 'object' && d.datasetId) dsIds.add(d.datasetId);
+      }
+    }
+  }
+  if (!dsIds.size) return { checked: 0, invalid: [] };
+  let realDs = [];
+  try {
+    const d = await client.post('/api/core/dataset/list', { parentId: null, searchKey: '' });
+    realDs = (d || []).map(x => x._id);
+  } catch {}
+  return { checked: dsIds.size, invalid: [...dsIds].filter(id => !realDs.includes(id)) };
+}
+
+/** 运行时体检：真跑一次 OpenAPI，返回结构化轨迹（不做 out） */
+async function runWorkflowOnce({ appId, key, variables, question = 'hello', chatId }) {
+  const res = await fetch(`${client.base}/api/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      appId, chatId: chatId || `cli-${Date.now()}`, stream: false, detail: true,
+      variables, messages: [{ role: 'user', content: question }]
+    })
+  });
+  const raw = await res.text();
+  if (!res.ok) return { ok: false, httpStatus: res.status, error: raw.slice(0, 200) };
+  const json = JSON.parse(raw);
+  const content = json.choices?.[0]?.message?.content ?? '';
+  let contract;
+  try { contract = JSON.parse(content); } catch { /* 非 JSON 输出 */ }
+  const trace = (json.responseData || []).map(n => {
+    const flat = JSON.stringify({ body: n.body, headers: n.headers });
+    return {
+      node: n.nodeId || n.moduleName,
+      type: n.moduleType,
+      httpCode: n.httpResult?.code,
+      total: n.httpResult?.data?.total,
+      body: n.body,
+      headers: n.headers,
+      unresolved: [...new Set([...flat.matchAll(/\{\{[^}]{0,60}\}\}/g)].map(m => m[0]))]
+    };
+  });
+  const unresolved = trace.filter(t => t.unresolved.length);
+  return {
+    ok: unresolved.length === 0,
+    httpStatus: res.status,
+    contentLength: content.length,
+    outputIsJson: !!contract,
+    Status: contract?.Status,
+    DataSetDate: contract?.DataSetDate,
+    domains: contract?.DomainList?.map(d => ({ name: d.name, terms: d.termlist?.length ?? 0 })),
+    Error: contract?.Error?.length ? contract.Error : undefined,
+    unresolvedVariables: unresolved,
+    trace: trace.filter(t => t.type === 'httpRequest468' || t.body || t.headers)
+  };
 }
 
 // ---------- DSL 构建（wf build / wf validate 共用） ----------
@@ -1048,33 +1134,24 @@ const commands = {
   async 'wf build'(args, f) {
     const file = f.file || args[0];
     if (!file) fail('需要 DSL 文件路径');
-    const dsl = readJson(file);
-    const appId = dsl.appId || f.appId;
+    const wf = loadWorkflow(file, f);
+    const appId = wf.raw.appId || f.appId;
     if (!appId) fail('DSL 需要 appId');
 
-    let built;
-    try { built = buildFromDsl(dsl); } catch (e) { fail(e.message); }
-    let { nodes, edges, chatConfig } = built;
-
-    // 规范化：把「能跑但前端不认」的写法修掉（handle 形态、裸变量、null 动态输入、ifElse 值类型）
-    const normalized = normalizeWorkflow({ nodes, edges, chatConfig, inlineConstInputs: !!f['inline-consts'] });
-    if (normalized.fixes.length) {
-      console.error('');
-      console.error('🔧 已自动规范化（这些写法服务端能跑，但前端/画布不认）：');
-      normalized.fixes.forEach(x => {
+    let { nodes, edges, chatConfig } = wf;
+    if (wf.fixes.length) {
+      console.error('\n🔧 已自动规范化（这些写法服务端能跑，但前端/画布不认）：');
+      wf.fixes.forEach(x => {
         console.error(`   ${x.where}: ${x.from} → ${x.to}`);
         console.error(`     ${x.reason}`);
       });
       console.error('');
-      nodes = normalized.nodes;
-      edges = normalized.edges;
     }
 
     // 内在参数自动调整（在 modelId 预检之前，避免给出基于错误参数的结论）
     const tuned = autoTuneNodeParams(nodes);
     if (tuned.length) {
-      console.error('');
-      console.error('⚙️  已自动调整节点参数：');
+      console.error('\n⚙️  已自动调整节点参数：');
       tuned.forEach(c => {
         const from = c.from === undefined ? '(未设置)' : c.from;
         console.error(`   ${c.node}.${c.param}: ${from} → ${c.to}`);
@@ -1083,7 +1160,7 @@ const commands = {
       console.error('');
     }
 
-    // 预检：dry-run 和真实部署走同一套校验（都要验证 modelId 真实性）
+    // dry-run 和真实部署走同一套校验（都要验证 modelId 真实性）
     if (!f['no-model-hook']) {
       nodes = await ensureModelIdHook(nodes, { autoFill: !f['no-auto-model'] });
     }
@@ -1092,122 +1169,82 @@ const commands = {
     if (!v.ok) {
       failCli('workflow_validate_failed', {
         hint: v.next,
-        details: {
-          errors: v.errors,
-          warnings: v.warnings,
-          issues: v.issues,
-          autoFixable: v.issues.filter(i => i.fix === 'auto').length,
-          manualFixRequired: v.issues.filter(i => i.fix !== 'auto').length
-        }
+        details: { errors: v.errors, warnings: v.warnings, issues: v.issues,
+                   autoFixable: v.issues.filter(i => i.fix === 'auto').length,
+                   manualFixRequired: v.issues.filter(i => i.fix !== 'auto').length }
+      });
+    }
+
+    const ids = await verifyResourceIds(nodes);
+    if (ids.invalid.length) {
+      failCli('dataset_not_found', {
+        message: `引用了当前团队不存在的知识库：${ids.invalid.join(', ')}`,
+        hint: '运行 fastgpt ds list 查看可用知识库 ID',
+        details: { invalidDatasetIds: ids.invalid }
       });
     }
 
     if (f['dry-run']) {
-      // 验证 datasetId 真实性
-      const dsIds = new Set();
-      for (const n of nodes) {
-        for (const inp of n.inputs || []) {
-          if (inp.key !== 'datasets' || !Array.isArray(inp.value)) continue;
-          for (const d of inp.value) {
-            if (d && typeof d === 'object' && d.datasetId) dsIds.add(d.datasetId);
-          }
-        }
-      }
-      const badDs = [];
-      if (dsIds.size) {
-        let realDs = [];
-        try {
-          const d = await client.post('/api/core/dataset/list', { parentId: null, searchKey: '' });
-          realDs = (d || []).map(x => x._id);
-        } catch {}
-        for (const id of dsIds) {
-          if (!realDs.includes(id)) badDs.push(id);
-        }
-      }
-      if (badDs.length) {
-        failCli('dataset_not_found', {
-          message: `DSL 引用了当前团队不存在的知识库：${badDs.join(', ')}`,
-          hint: '运行 fastgpt ds list 查看可用知识库 ID',
-          details: { invalidDatasetIds: badDs }
-        });
-      }
-
       out(withNotice(
-        { ok: true, dryRun: true, nodes: nodes.length, edges: edges.length, warnings: v.warnings,
-          verified: { modelId: true, datasetIds: dsIds.size } },
+        { ok: true, dryRun: true, nodes: nodes.length, edges: edges.length,
+          warnings: v.warnings, verified: { modelId: true, datasetIds: ids.checked } },
         Notice.dryRunOnly()
       ));
       return;
     }
 
-    // publish 默认 true：用户说「要能直接拿来用」就是发布状态
-    const published = dsl.publish !== false;
-    await client.post(`/api/core/app/version/publish?appId=${appId}`, {
-      nodes, edges, chatConfig,
-      isPublish: published, autoSave: !published,
-      versionName: dsl.versionName || 'v1'
-    });
-    const payload = { ok: true, appId, nodes: nodes.length, edges: edges.length,
-                      publish: published, warnings: v.warnings };
+    const published = wf.raw.publish !== false;
+    await deployWorkflow({ appId, nodes, edges, chatConfig, versionName: wf.raw.versionName, publish: published });
+    const payload = { ok: true, appId, nodes: nodes.length, edges: edges.length, publish: published, warnings: v.warnings };
     out(published ? payload : withNotice(payload, Notice.notPublished()));
   },
 
   /** 纯语法检查：离线，不验证 ID 真实性，不代表可部署 */
+  /**
+   * 离线体检：规范化 → 校验。
+   * --fix <out>      写出规范化结果（可直接喂 wf build）
+   * --inline-consts  canEdit 常量内联进代码（内容级修改，默认关）
+   */
   async 'wf lint'(args, f) {
     const file = f.file || args[0];
     if (!file) fail('需要 JSON 文件路径');
-    const d = readJson(file);
-    let nodes, edges, chatConfig;
-    try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); } catch (e) { fail(e.message); }
+    const r = lintWorkflow(file, f);
 
-    // 先规范化再校验：把「服务端能跑但前端不认」的写法自动修掉，剩下的才是真问题。
-    // --fix <out.json> 会把修好的完整结构写出来，可直接喂 wf build。
-    const normalized = normalizeWorkflow({ nodes, edges, chatConfig, inlineConstInputs: !!f['inline-consts'] });
-    nodes = normalized.nodes; edges = normalized.edges;
-
-    const v = validateWorkflow({ nodes, edges, chatConfig });
-    const placeholder = [];
-    for (const n of nodes) {
-      for (const inp of n.inputs || []) {
-        if (inp.key === 'modelId' && typeof inp.value === 'string' && !/^[0-9a-f]{24}$/i.test(inp.value)) {
-          placeholder.push({ node: n.nodeId, value: inp.value });
-        }
-      }
-    }
     if (f.fix) {
-      fs.writeFileSync(f.fix, JSON.stringify({ nodes, edges, chatConfig }, null, 2));
+      fs.writeFileSync(f.fix, JSON.stringify({ nodes: r.nodes, edges: r.edges, chatConfig: r.chatConfig }, null, 2));
     }
     out({
-      ok: v.ok,
+      ok: r.ok,
       lintOnly: true,
       note: '仅语法 + 渲染契约检查，未验证 modelId / datasetId 真实性，不代表可部署',
-      nodes: nodes.length,
-      edges: edges.length,
-      autoFixed: normalized.fixes,
-      errors: v.errors,
-      warnings: v.warnings,
-      issues: v.issues,
-      ...(placeholder.length ? { unresolvedModelIds: placeholder } : {}),
+      nodes: r.nodes.length,
+      edges: r.edges.length,
+      autoFixed: r.fixes,
+      errors: r.errors,
+      warnings: r.warnings,
+      issues: r.issues,
+      autoFixable: r.autoFixable,
+      manualFixRequired: r.manualFixRequired,
+      ...(r.unresolvedModelIds.length ? { unresolvedModelIds: r.unresolvedModelIds } : {}),
       ...(f.fix ? { fixedFile: f.fix } : {}),
-      next: v.ok
-        ? (f.fix ? `已写出规范化结果 ${f.fix}，可直接 fastgpt wf build ${f.fix}` : '语法没问题。真实部署用 fastgpt wf build <file>（需要登录）')
-        : (v.next || '先修正 errors，再运行 fastgpt wf build')
+      next: r.ok
+        ? (f.fix
+            ? `已写出规范化结果 ${f.fix}，可直接 fastgpt wf build ${f.fix}`
+            : '语法没问题。部署用 fastgpt wf build <file>；想一次跑完全链路用 fastgpt wf verify')
+        : (r.next || '先修正 errors，再运行 fastgpt wf build')
     });
-    if (!v.ok) process.exit(2);
+    if (!r.ok) process.exit(2);
   },
 
+  /** wf validate 是 wf lint 的别名（历史命令，保留兼容） */
   async 'wf validate'(args, f) {
     const file = f.file || args[0];
     if (!file) fail('需要 JSON 文件路径');
-    const d = readJson(file);
-    // 两种输入都吃：DSL（节点带 type）或 FastGPT 原生导出（节点带 nodeId/flowNodeType）
-    let nodes, edges, chatConfig;
-    try { ({ nodes, edges, chatConfig } = buildFromDsl(d)); } catch (e) { fail(e.message); }
-    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
-    const v = validateWorkflow(normalized);
-    v.nodeCount = normalized.nodes.length; v.edgeCount = normalized.edges.length;
-    v.autoFixed = normalized.fixes;
-    out(v); if (!v.ok) process.exit(2);
+    const r = lintWorkflow(file, f);
+    out({ ok: r.ok, nodeCount: r.nodes.length, edgeCount: r.edges.length,
+          errors: r.errors, warnings: r.warnings, issues: r.issues,
+          autoFixed: r.fixes, next: r.next });
+    if (!r.ok) process.exit(2);
   },
 
   async 'wf get'(args, f) {
@@ -1242,14 +1279,12 @@ const commands = {
     if (!appId) fail('需要 appId');
     if (!file) fail('需要 workflow 文件（DSL 或原生导出 JSON）');
 
-    let nodes, edges, chatConfig;
-    try { ({ nodes, edges, chatConfig } = buildFromDsl(readJson(file))); } catch (e) { fail(e.message); }
-    // 与 build 对齐：先规范化，否则会把「我们会自动修的」误报成服务端改动
-    const normalized = normalizeWorkflow({ nodes, edges, chatConfig });
+    // 与 build 对齐：loadWorkflow 已做规范化，否则会把「我们会自动修的」误报成服务端改动
+    const wf = loadWorkflow(file, f);
 
     const stored = await client.get(`/api/core/app/detail?appId=${appId}`);
     const diff = diffWorkflow({
-      submitted: { nodes: normalized.nodes, edges: normalized.edges, chatConfig },
+      submitted: { nodes: wf.nodes, edges: wf.edges, chatConfig: wf.chatConfig },
       stored: { nodes: stored.nodes || [], edges: stored.edges || [], chatConfig: stored.chatConfig || {} }
     });
 
@@ -1290,6 +1325,130 @@ const commands = {
     if (diff.verdict === 'data_loss') process.exit(2);
   },
 
+  /**
+   * 一条龙验证：lint → dry-run → 部署 → diff → 运行时 →（可选）UI。
+   * 默认在「影子应用」上做，跑完自动删除；--appId 则直接对指定应用跑（会写入）。
+   * 任一步失败即停，返回 failedAt + 该步 hint + 已跑完的步骤轨迹。
+   */
+  async 'wf verify'(args, f) {
+    const file = f.file || args[0];
+    if (!file) fail('需要 workflow 文件（DSL 或原生导出 JSON）');
+
+    const steps = [];
+    const t0 = Date.now();
+    const push = (step, ok, detail = {}) => steps.push({ step, ok, ms: Date.now() - t0, ...detail });
+    const stop = (step, hint, details) => {
+      out({ ok: false, failedAt: step, file, steps, hint, ...(details ? { details } : {}),
+            next: `修掉 ${step} 的问题后重跑 fastgpt wf verify ${file}` });
+      process.exit(2);
+    };
+
+    // ① 离线体检 + 规范化
+    const lint = lintWorkflow(file, f);
+    push('lint', lint.ok, {
+      nodes: lint.nodes.length, edges: lint.edges.length,
+      autoFixed: lint.fixes.length, issues: lint.issues.length, manualFixRequired: lint.manualFixRequired
+    });
+    if (!lint.ok) stop('lint', lint.next || '先修 lint 的 manual 项', { issues: lint.issues });
+
+    // ② 目标：默认影子应用（不碰生产）
+    const mode = f.appId ? 'app' : 'shadow';
+    let appId = f.appId;
+    if (mode === 'shadow') {
+      appId = await client.post('/api/core/app/create', {
+        name: f.name || `cli-verify-${Date.now()}`, type: 'advanced',
+        avatar: 'core/app/type/workflowFill', intro: ''
+      });
+    }
+    push('target', true, { mode, appId });
+
+    try {
+      // ③ 校验 + ID 真实性
+      let { nodes, edges, chatConfig } = lint;
+      if (!f['no-model-hook']) nodes = await ensureModelIdHook(nodes, { autoFill: !f['no-auto-model'] });
+      const v = validateWorkflow({ nodes, edges, chatConfig });
+      if (!v.ok) { push('validate', false, { errors: v.errors }); stop('validate', v.next, { issues: v.issues }); }
+      const ids = await verifyResourceIds(nodes);
+      if (ids.invalid.length) {
+        push('resource_ids', false, { invalid: ids.invalid });
+        stop('resource_ids', 'datasetId 不在当前团队：先 fastgpt ds list 确认', { invalidDatasetIds: ids.invalid });
+      }
+      push('validate', true, { datasetIds: ids.checked, warnings: v.warnings.length });
+
+      // ④ 部署
+      await deployWorkflow({ appId, nodes, edges, chatConfig, versionName: f.versionName || 'cli-verify', publish: true });
+      push('deploy', true, { nodes: nodes.length, edges: edges.length });
+
+      // ⑤ 提交 vs 落库
+      const stored = await client.get(`/api/core/app/detail?appId=${appId}`);
+      const diff = diffWorkflow({
+        submitted: { nodes, edges, chatConfig },
+        stored: { nodes: stored.nodes || [], edges: stored.edges || [], chatConfig: stored.chatConfig || {} }
+      });
+      push('diff', diff.verdict !== 'data_loss', {
+        verdict: diff.verdict,
+        counts: { added: diff.added.length, removed: diff.removed.length, injected: diff.injected.length,
+                  stripped: diff.stripped.length, changed: diff.changed.length, whitelisted: diff.whitelistedCount }
+      });
+      if (diff.verdict === 'data_loss') {
+        stop('diff', '提交的内容有丢失（stripped/removed 非空），先合并回本地文件', { stripped: diff.stripped, removed: diff.removed });
+      }
+
+      // ⑥ 运行时（没有 apikey 就跳过，不算失败）
+      const keyFile = f.keyFile || '.fastgpt/apikey';
+      const key = f.key || process.env.FASTGPT_APP_KEY || (fs.existsSync(keyFile) ? fs.readFileSync(keyFile, 'utf8').trim() : '');
+      let variables;
+      if (f.variables) { try { variables = JSON.parse(f.variables); } catch { fail('--variables 需要 JSON 字符串'); } }
+      if (!key) {
+        push('run', true, { skipped: `没有 API Key（${keyFile}），跳过运行时体检` });
+      } else {
+        const r = await runWorkflowOnce({ appId, key, variables, question: f.q, chatId: f.chatId });
+        push('run', r.ok, {
+          httpStatus: r.httpStatus, Status: r.Status, DataSetDate: r.DataSetDate,
+          domains: r.domains, unresolved: r.unresolvedVariables, trace: r.trace
+        });
+        if (!r.ok) stop('run', '运行时不通过：变量没替换或契约异常', r);
+      }
+
+      // ⑦ 可选 UI 校验（外挂命令，保持 CLI 零依赖；{appId} 会被替换）
+      if (f['ui-cmd']) {
+        const { execSync } = await import('node:child_process');
+        const cmd = String(f['ui-cmd']).replace(/\{appId\}/g, appId);
+        try {
+          const stdout = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          push('ui', true, { cmd, tail: String(stdout).trim().slice(-400) });
+        } catch (e) {
+          push('ui', false, { cmd, exit: e.status });
+          stop('ui', 'UI 校验未通过（前端仍有报错/裸变量/缺芯片）', { tail: String(e.stdout || e.stderr || '').trim().slice(-1500) });
+        }
+      }
+    } finally {
+      if (mode === 'shadow' && f.keep !== true) {
+        try { await client.del(`/api/core/app/del?appId=${appId}`); push('cleanup', true, { appId }); }
+        catch (e) { push('cleanup', false, { appId, error: e.message }); }
+      } else if (mode === 'shadow') {
+        push('cleanup', true, { appId, kept: true });
+      }
+    }
+
+    const total = Date.now() - t0;
+    out(withNotice({
+      ok: true,
+      file,
+      target: { mode, appId },
+      verdict: 'all_passed',
+      totalMs: total,
+      steps,
+      next: mode === 'shadow'
+        ? `影子应用验证通过。对生产应用执行：fastgpt wf verify ${file} --appId <appId>`
+        : '全链路通过，可以交付'
+    }, {
+      type: 'verify_passed',
+      message: '全链路通过',
+      hint: mode === 'shadow' ? '影子应用已删除（--keep 可保留）；生产应用尚未写入' : undefined
+    }));
+  },
+
   /** 草稿 / 版本层一致性：判断「我改的东西到底写进哪一层了」 */
   async 'wf versions'(args, f) {
     const appId = f.appId || args[0];
@@ -1321,10 +1480,6 @@ const commands = {
     });
   },
 
-  /**
-   * 运行时体检：真跑一次 OpenAPI，把每个节点的实际入参摊开。
-   * 静态 JSON 里有引用 ≠ 运行时真的替换成功；这一层专门抓「变量没替换」。
-   */
   async 'wf check-run'(args, f) {
     const appId = f.appId || args[0];
     if (!appId) fail('需要 appId');
@@ -1335,50 +1490,16 @@ const commands = {
     if (f.variables) {
       try { variables = JSON.parse(f.variables); } catch { fail('--variables 需要 JSON 字符串'); }
     }
-    const res = await fetch(`${client.base}/api/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        appId, chatId: f.chatId || `cli-${Date.now()}`, stream: false, detail: true,
-        variables, messages: [{ role: 'user', content: f.q || 'hello' }]
-      })
-    });
-    const raw = await res.text();
-    if (!res.ok) fail(`对话接口返回 ${res.status}: ${raw.slice(0, 200)}`);
-    const json = JSON.parse(raw);
-    const content = json.choices?.[0]?.message?.content ?? '';
-    let contract;
-    try { contract = JSON.parse(content); } catch { /* 非 JSON 输出 */ }
-    const trace = (json.responseData || []).map(n => {
-      const flat = JSON.stringify({ body: n.body, headers: n.headers });
-      return {
-        node: n.nodeId || n.moduleName,
-        type: n.moduleType,
-        httpCode: n.httpResult?.code,
-        total: n.httpResult?.data?.total,
-        body: n.body,
-        headers: n.headers,
-        unresolved: [...new Set([...flat.matchAll(/\{\{[^}]{0,60}\}\}/g)].map(m => m[0]))]
-      };
-    });
-    const bad = trace.filter(t => t.unresolved.length);
-    out(withNotice({
-      ok: bad.length === 0,
-      appId,
-      contentLength: content.length,
-      outputIsJson: !!contract,
-      Status: contract?.Status,
-      DataSetDate: contract?.DataSetDate,
-      domains: contract?.DomainList?.map(d => ({ name: d.name, terms: d.termlist?.length ?? 0 })),
-      Error: contract?.Error?.length ? contract.Error : undefined,
-      unresolvedVariables: bad,
-      trace: trace.filter(t => t.type === 'httpRequest468' || t.body || t.headers)
-    }, bad.length ? {
+
+    const r = await runWorkflowOnce({ appId, key, variables, question: f.q, chatId: f.chatId });
+    if (r.httpStatus !== 200) fail(`对话接口返回 ${r.httpStatus}: ${r.error || ''}`);
+
+    out(withNotice({ appId, ...r }, r.ok ? null : {
       type: 'unresolved_variable',
       message: '运行时有变量没被替换，值里残留 {{...}}',
-      hint: '检查该节点的输入是否引用了未定义/未传值的全局变量；wf lint 能提前发现裸占位 {{key}}'
-    } : null));
-    if (bad.length) process.exit(2);
+      hint: '检查该节点输入是否引用了未定义/未传值的全局变量；wf lint 能提前发现裸占位'
+    }));
+    if (!r.ok) process.exit(2);
   },
 
   // ===== 知识库 =====
@@ -1931,6 +2052,7 @@ const commands = {
           'build <dsl.json|原生导出.json> [--dry-run]   需要登录；构建前自动规范化 handle/裸变量/null 动态输入',
           'lint <file> [--fix out.json]   离线：语法 + 渲染契约检查；--fix 写出规范化结果，可直接喂 build',
           'validate <json>                同 lint（含自动规范化报告 autoFixed）',
+          "verify <file> [--appId] [--ui-cmd]      一条龙：lint→校验→部署→diff→运行时→(UI)，默认影子应用跑完即删",
           "check-run <appId> [-q] [--variables '{}'] 运行时体检：真跑一次，摊开每节点入参与未替换变量",
           'versions <appId>               草稿 / version/latest / 各版本指纹对比（判断改动写进哪一层）',
           'diff <appId> <file>            提交 vs 落库分类对比：服务端 migration 改了/丢了什么',

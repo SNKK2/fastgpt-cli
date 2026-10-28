@@ -146,6 +146,36 @@ fastgpt wf build wf.json --dry-run
 fastgpt wf build wf.json
 ```
 
+### 一条命令跑完全链路：`wf verify`
+
+```bash
+fastgpt wf verify export.json --inline-consts \
+  --variables '{"RequestId":"<uuid>","DomainList":"[\"IE-内饰\"]"}' \
+  --ui-cmd 'node scripts/check-ui.mjs {appId}'
+```
+
+七步串成一条，**默认在影子应用上跑，跑完自动删除**（`--appId` 才写入生产，`--keep` 保留影子）：
+
+```
+lint → target(影子) → validate+dryrun → deploy → diff → run → (ui) → cleanup
+```
+
+```json
+{ "verdict": "all_passed", "totalMs": 3484,
+  "steps": [
+    { "step": "lint",     "ok": true, "autoFixed": 65, "issues": 0 },
+    { "step": "target",   "ok": true, "mode": "shadow" },
+    { "step": "validate", "ok": true },
+    { "step": "deploy",   "ok": true },
+    { "step": "diff",     "ok": true, "verdict": "clean",
+      "counts": { "whitelisted": 141, "stripped": 0 } },
+    { "step": "run",      "ok": true, "Status": "success" },
+    { "step": "cleanup",  "ok": true }
+  ] }
+```
+
+任一步失败即停：`{ ok:false, failedAt, hint, steps, details }`，exit 2。没配 API Key 时 `run` 步标注 `skipped`，不算失败。
+
 ### 部署后三层检测（v0.2.0 起内建）
 
 工作流的坑分三层，**每层都会骗过另外两层**，必须各测一次：

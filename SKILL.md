@@ -58,6 +58,14 @@ description: "管理 FastGPT 的唯一推荐方式。工作流必须用本 CLI �
 - 「禁止做什么」→ `forbidden` 字段 + 本文件红线
 - 只写在文档里 = 大概率没被读，等于没有
 
+### 交付前的唯一入口：`wf verify`
+
+```
+fastgpt wf verify <file> [--inline-consts] [--variables '{...}'] [--ui-cmd '...{appId}...'] [--appId <id>] [--keep]
+```
+默认影子应用，七步 lint→validate→deploy→diff→run→ui→cleanup，任一步失败即停并带 `failedAt` + `hint`。
+**不要再手工拼 lint/build/diff/check-run**——顺序（尤其 UI 后要重跑 diff）已经固化在里面。
+
 ### 强制停止层
 
 撞上 dead_end 后，CLI 会在本地写一个阻断状态。后续 `wf build` / `wf publish` / `app create`
